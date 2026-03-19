@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional, Dict
 import subprocess
 
-from utils.file_utils import download_video, cleanup_file
+from utils.file_utils import cleanup_file
 
 # ── Gap proportions (fraction of source video height) ────────────────────────
 # Applied at render time based on actual source dimensions.
@@ -265,22 +265,20 @@ async def render_video(
     Returns:
         {'output_path': str, 'duration': float}
     """
-    temp_video_path = None
     logo_png_path = None
     output_path = None
 
     try:
         # ── 1. Resolve input ──────────────────────────────────────────────
+        # FFmpeg and ffprobe support HTTP/HTTPS URLs natively — no download needed
         if video_url:
-            temp_video_path = await download_video(video_url)
-            input_path = temp_video_path
+            input_path = video_url
         elif video_path:
             input_path = video_path
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Video file not found: {input_path}")
         else:
             raise ValueError("Either video_url or video_path must be provided")
-
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"Video file not found: {input_path}")
 
         duration = end - start
         output_path = tempfile.mktemp(suffix=".mp4")
@@ -386,8 +384,6 @@ async def render_video(
         return {"output_path": output_path, "duration": duration}
 
     finally:
-        if temp_video_path:
-            await cleanup_file(temp_video_path)
         if logo_png_path and os.path.exists(logo_png_path):
             try:
                 os.remove(logo_png_path)

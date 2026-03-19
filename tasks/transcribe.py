@@ -5,7 +5,7 @@ from typing import Optional, List, Dict
 import whisper
 import torch
 
-from utils.file_utils import download_video, cleanup_file
+from utils.file_utils import cleanup_file
 
 
 # Initialize Whisper model (lazy loading)
@@ -37,21 +37,18 @@ async def transcribe_video(
     Returns:
         Dictionary with text, words, and language
     """
-    temp_video_path = None
     temp_audio_path = None
 
     try:
-        # Download video if URL provided
+        # FFmpeg and ffprobe support HTTP/HTTPS URLs natively — no download needed
         if video_url:
-            temp_video_path = await download_video(video_url)
-            input_path = temp_video_path
+            input_path = video_url
         elif video_path:
             input_path = video_path
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Video file not found: {input_path}")
         else:
             raise ValueError("Either video_url or video_path must be provided")
-
-        if not os.path.exists(input_path):
-            raise FileNotFoundError(f"Video file not found: {input_path}")
 
         # Extract audio from video using FFmpeg
         temp_audio_path = tempfile.mktemp(suffix=".wav")
@@ -122,8 +119,5 @@ async def transcribe_video(
         return result
 
     finally:
-        # Cleanup temporary files
-        if temp_video_path:
-            await cleanup_file(temp_video_path)
         if temp_audio_path:
             await cleanup_file(temp_audio_path)
