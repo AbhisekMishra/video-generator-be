@@ -1,231 +1,229 @@
-```
-Hey There! 🙌 
-🤾 that ⭐️ button if you like this boilerplate. 
-```
+# Video Generator Backend
 
-<img alt="express-typescript" src="https://geekyants.github.io/express-typescript/public/images/express-typescript.png" height="50%" width="60%">
+Python FastAPI worker for video transcription and rendering.
 
-A boilerplate for [Node.js](https://nodejs.org/en) App.
+## Features
 
-* This boilerplate is built using [Express.js](https://expressjs.com/) web framework, and is using [Typescript Lang](https://www.typescriptlang.org/) for writing the app's logic. 
-* It uses Node's [Cluster API](https://nodejs.org/api/cluster.html), this helps us to take advantage of multi-core systems & to handle the load.
-* For storing custom constant configurations within the `process.env` - [DotEnv](https://github.com/motdotla/dotenv) package is used.
-* For Database - Repo contains the use of [Mongoose](https://mongoosejs.com/) (ie. [MongoDB](https://www.mongodb.com/) object modeling for [Node.js](https://nodejs.org/en/)).
-* For Cache - Repo contains the use of [memory-cache](https://github.com/ptarjan/node-cache#readme) (ie. A simple in-memory cache for node.js).
-* For Routing - Repo contains the use of [express-router](https://expressjs.com/en/guide/routing.html) & have distributed Routes into two files ie. Web Routes & API Routes. 
-* For Route Auth Middleware - Web routes are configured with [CSRF Token](https://github.com/krakenjs/lusca) while the API routes are configured with [JSON Web Token](https://github.com/auth0/express-jwt).
-* For Strategies Auth - Repo contains the use of the [Passport.js](https://github.com/jaredhanson/passport). Passport.js is compatible with Express.js and is authentication middleware for Node.js.
-* For Logging - Repo uses custom Log class built in middlewares folder, and it creates logs file by date & removes the log files after 'X' days (You can define that 'X' in the `.env` file).
-* For Handling Exception - Repo contains two classes ie. `Handler` & `NativeEvent`.
-* To Log - use `Log.info('Your message should go here!')`. Other options for logging are `Log.warn`, `Log.error` & `Log.custom`.
-* For views - Repo contains the use of [PUG](https://github.com/pugjs/pug) template engine.
-* For background queues - Repo contains the use of [Kue](https://github.com/Automattic/kue). For more details, please review the [Queue](https://github.com/faizahmedfarooqui/nodets/blob/master/src/providers/Queue.ts) class.
+- **Transcription**: Uses OpenAI's `whisper` for accurate video transcription with word-level timestamps
+- **Rendering**: Uses FFmpeg for vertical crop (9:16 aspect ratio) video processing
+- **File Management**: Automatic cleanup of temporary files
+- **Windows Compatible**: No compilation required - uses pre-built packages
 
-# Contents
+## Prerequisites
 
-* [Global Requisites](#global-requisites)
-* [App Structure](#app-structure)
-* [Install, Configure & Run](#install-configure--run)
-* [List of Routes](#list-of-routes)
-* [Screens](#screens)
+1. **Python 3.9+**
+2. **FFmpeg** - Must be installed and available in PATH
+   - Ubuntu/Debian: `sudo apt-get install ffmpeg`
+   - macOS: `brew install ffmpeg`
+   - Windows: Download from [https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
 
-# Global Requisites
+## Setup
 
-* node (>= 10.5.0)
-* tsc (>= 3.0.1)
-* typescript (>= 3.0.1)
-* mongoose (>= 3.6.2)
-* redis
-
-# App Structure
-
-> _Note: I am mentioning only files/folders which you need to configure if required_
+### 1. Create Virtual Environment
 
 ```bash
-├── dist
-├── public
-├── src
-│   ├── controllers
-│   │   ├── Api
-│   │   │   ├── Auth
-│   │   │   │   ├── Login.ts
-│   │   │   │   ├── RefreshToken.ts
-│   │   │   │   └── Register.ts
-│   │   │   └── Home.ts
-│   │   ├── Auth
-│   │   │   ├── Login.ts
-│   │   │   ├── Logout.ts
-│   │   │   ├── Register.ts
-│   │   │   └── Social.ts
-│   │   ├── Account.ts
-│   │   └── Home.ts
-│   ├── exception
-│   │   ├── Handler.ts
-│   │   └── NativeEvent.ts
-│   ├── interfaces
-│   │   ├── models
-│   │   │   └── user.ts
-│   │   └── vendors
-│   │        ├── index.ts
-│   │        ├── INext.ts
-│   │        ├── IRequest.ts
-│   │        └── IResponse.ts
-│   ├── middlewares
-│   │   ├── CORS.ts
-│   │   ├── CsrfToken.ts
-│   │   ├── Http.ts
-│   │   ├── Kernel.ts
-│   │   ├── Log.ts
-│   │   ├── Statics.ts
-│   │   ├── StatusMonitor.ts
-│   │   └── View.ts
-│   ├── models
-│   │   └── User.ts
-│   ├── providers
-│   │   ├── App.ts
-│   │   ├── Cache.ts
-│   │   ├── Database.ts
-│   │   ├── Express.ts
-│   │   ├── Locals.ts
-│   │   ├── Passport.ts
-│   │   ├── Queue.ts
-│   │   └── Routes.ts
-│   ├── routes
-│   │   ├── Api.ts
-│   │   └── Web.ts
-│   ├── services
-│   │   └── strategies
-│   │        ├── Google.ts
-│   │        ├── Local.ts
-│   │        └── Twitter.ts
-│   └── index.ts
-├── views
-│   ├── includes
-│   ├── modals
-│   ├── pages
-│   ├── partials
-│   ├── static
-│   │   ├── css/*.css
-│   │   └── js/*.js
-│   └── layout.pug
-├── .env
-├── .gitignore
-├── nodemon.json
-├── package.json
-├── README.md
-├── tsconfig.json
-└── tslint.json
+cd video-generator-be
+python -m venv venv
+
+# Activate virtual environment
+# Windows:
+venv\Scripts\activate
+# macOS/Linux:
+source venv/bin/activate
 ```
 
-# Install, Configure & Run
-
-Below mentioned are the steps to install, configure & run in your platform/distributions.
+### 2. Install Dependencies
 
 ```bash
-# Clone the repo.
-git clone https://github.com/GeekyAnts/express-typescript.git;
-
-# Goto the cloned project folder.
-cd nodets;
+pip install -r requirements.txt
 ```
+
+### 3. Verify FFmpeg Installation
 
 ```bash
-# Without Docker
-
-# Note: It is assumed here that you have MongoDB running in the background and that you have created the database.
-
-# Install NPM dependencies.
-# Note: You can review the list of dependencies from the below link.
-# https://github.com/faizahmedfarooqui/nodets/network/dependencies
-npm install;
-
-# Edit your DotEnv file using any editor of your choice.
-# Please Note: You should add all the configurations details
-# or else default values will be used!
-vim .env;
-
-# Run the app
-npm run dev;
+ffmpeg -version
 ```
+
+### 4. Start the Server
 
 ```bash
-# With Docker
-
-# Note: It is assumed here that you have Docker running in the background.
-
-# Run the app in docker as a foreground process
-docker-compose up
-
-# Run the app in docker as a background process
-docker-compose up -d
+python main.py
 ```
 
+Or with uvicorn directly:
 
-# List of Routes
-
-```sh
-# Web Routes:
-
-+--------+-------------------------+
-  Method | URI
-+--------+-------------------------+
-  GET    | /
-  GET    | /signup
-  POST   | /signup
-  GET    | /login
-  POST   | /login
-  GET    | /logout
-  GET    | /account
-  GET    | /auth/google
-  GET    | /auth/google/callback
-  GET    | /auth/twitter
-  GET    | /auth/twitter/callback
-  GET    | /status-monitor
-+--------+-------------------------+
-
-# API Routes:
-
-+--------+-------------------------+
-  Method | URI
-+--------+-------------------------+
-  POST   | /api
-  POST   | /api/auth/login
-  POST   | /api/auth/register
-  POST   | /api/auth/refresh-token
-+--------+-------------------------+
+```bash
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-# Screens
+The API will be available at `http://localhost:8000`
 
-### Home / Landing Page
+## API Documentation
 
-![Home / Landing Page](/screens/Home.png)
-> Note: This page has sub-sections, like about-us, contact-us & portfolio
+### POST `/process`
 
-### LogIn Page
+Process video based on task type.
 
-![LogIn Page](/screens/Login.png)
-> Note: LogIn with Providers
+#### Task: `transcribe`
 
-### SignUp Page
+Transcribe video using faster-whisper.
 
-![SignUp Page](/screens/SignUp.png)
-> Note: SignUp with Providers
+**Request:**
+```json
+{
+  "task": "transcribe",
+  "video_url": "https://example.com/video.mp4"
+}
+```
 
-### Dashboard Page
+Or with local file:
+```json
+{
+  "task": "transcribe",
+  "video_path": "/path/to/video.mp4"
+}
+```
 
-![Dashboard Page](/screens/Dashboard.png)
+**Response:**
+```json
+{
+  "text": "Full transcription text here...",
+  "words": [
+    {
+      "word": "Hello",
+      "start": 0.5,
+      "end": 0.8
+    }
+  ],
+  "language": "en"
+}
+```
 
-### With Dropdown Menu
+#### Task: `render`
 
-![Dashboard Page with Dropdown Menu](/screens/DashboardWithDropdown.png)
+Crop video to 9:16 aspect ratio using FFmpeg.
 
-### Page Not Found Page
+**Request:**
+```json
+{
+  "task": "render",
+  "video_url": "https://example.com/video.mp4",
+  "center_x": 960,
+  "start": 10.5,
+  "end": 45.2
+}
+```
 
-![Page Not Found Page](/screens/PageNotFound.png)
-> Note: In case the requested URI does not exist, app shows this page
+**Parameters:**
+- `center_x`: X coordinate for center of the crop
+- `start`: Start timestamp in seconds
+- `end`: End timestamp in seconds
 
-### Under Maintenance Page
+**Response:**
+```json
+{
+  "output_path": "/tmp/tmpXXXXXX.mp4",
+  "duration": 34.7
+}
+```
 
-![Under Maintenance Page](/screens/UnderMaintenance.png)
-> Note: In case an error is generated, so instead of plain errors we can show the under maintenance page.
+## Example Usage
+
+### Using cURL
+
+**Transcribe:**
+```bash
+curl -X POST http://localhost:8000/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "transcribe",
+    "video_path": "/path/to/video.mp4"
+  }'
+```
+
+**Render:**
+```bash
+curl -X POST http://localhost:8000/process \
+  -H "Content-Type: application/json" \
+  -d '{
+    "task": "render",
+    "video_path": "/path/to/video.mp4",
+    "center_x": 960,
+    "start": 0,
+    "end": 30
+  }'
+```
+
+### Using Python
+
+```python
+import requests
+
+# Transcribe
+response = requests.post(
+    "http://localhost:8000/process",
+    json={
+        "task": "transcribe",
+        "video_path": "/path/to/video.mp4"
+    }
+)
+result = response.json()
+print(result["text"])
+
+# Render
+response = requests.post(
+    "http://localhost:8000/process",
+    json={
+        "task": "render",
+        "video_path": "/path/to/video.mp4",
+        "center_x": 960,
+        "start": 0,
+        "end": 30
+    }
+)
+result = response.json()
+print(f"Output: {result['output_path']}")
+```
+
+## Project Structure
+
+```
+video-generator-be/
+├── main.py                 # FastAPI application
+├── tasks/
+│   ├── __init__.py
+│   ├── transcribe.py      # Whisper transcription logic
+│   └── render.py          # FFmpeg rendering logic
+├── utils/
+│   ├── __init__.py
+│   └── file_utils.py      # File download and cleanup utilities
+├── requirements.txt       # Python dependencies
+└── README.md
+```
+
+## Configuration
+
+The Whisper model is configured in `tasks/transcribe.py`. Default is `base` model.
+
+Available models (in order of speed/accuracy trade-off):
+- `tiny` - Fastest, least accurate
+- `base` - Good balance (default)
+- `small` - Better accuracy
+- `medium` - High accuracy
+- `large` - Best accuracy
+- `large-v2` - Enhanced accuracy
+- `large-v3` - Latest, best accuracy
+
+To change the model, edit line 22 in `tasks/transcribe.py`:
+```python
+_whisper_model = whisper.load_model("base", device=device)
+```
+
+GPU acceleration is automatic if CUDA is available (PyTorch detects it automatically).
+
+## Notes
+
+- Temporary files are automatically cleaned up after processing
+- Rendered videos are saved to temporary files - move them to permanent storage before they're deleted
+- The first transcription may take longer as the Whisper model is downloaded
+- Audio is extracted at 16kHz mono for optimal Whisper performance

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 520 340" width="520" height="340">
+  <defs>
+    <linearGradient id="gL" x1="0%" y1="0%" x2="60%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#FF2D78"/>
+    </linearGradient>
+    <linearGradient id="gR" x1="40%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00CFFF"/>
+      <stop offset="100%" stop-color="#5B2FDD"/>
+    </linearGradient>
+    <linearGradient id="gM" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FF2D78"/>
+      <stop offset="100%" stop-color="#00CFFF"/>
+    </linearGradient>
+    <linearGradient id="gCross" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#FFE566"/>
+      <stop offset="100%" stop-color="#FF6B35"/>
+    </linearGradient>
+    <filter id="dropshadow">
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <polygon points="40,300  77,318  192,78  155,60"
+           fill="url(#gL)" filter="url(#dropshadow)"/>
+  <polygon points="155,60  192,78  280,242  244,224"
+           fill="url(#gM)" filter="url(#dropshadow)"/>
+  <ellipse cx="262" cy="233" rx="20" ry="14" fill="url(#gM)"/>
+  <polygon points="244,224  280,242  373,78  335,60"
+           fill="url(#gR)" filter="url(#dropshadow)"/>
+  <polygon points="335,60  373,78  443,218  405,200"
+           fill="url(#gR)" filter="url(#dropshadow)"/>
+  <ellipse cx="424" cy="209" rx="18" ry="12" fill="url(#gR)"/>
+  <polygon points="405,200  443,218  487,94  448,80"
+           fill="url(#gR)" filter="url(#dropshadow)"/>
+  <polygon points="448,80  487,94  521,306  480,300"
+           fill="url(#gR)" filter="url(#dropshadow)"/>
+  <rect x="114" y="178" width="120" height="28" rx="7"
+        fill="url(#gCross)" filter="url(#dropshadow)"/>
+  <rect x="32" y="294" width="58" height="16" rx="5" fill="url(#gL)"/>
+  <rect x="468" y="294" width="58" height="16" rx="5" fill="url(#gR)"/>
+  <circle cx="155" cy="58"  r="10" fill="#FFE566"/>
+  <circle cx="335" cy="58"  r="10" fill="#00FFCC"/>
+  <circle cx="448" cy="78"  r="8"  fill="#00E5FF"/>
+</svg>
