@@ -44,12 +44,14 @@ async def get_checkpointer() -> AsyncPostgresSaver:
     # Create async connection pool (singleton)
     _pool_instance = AsyncConnectionPool(
         conninfo=connection_string,
-        max_size=20,
-        min_size=2,
+        max_size=3,
+        min_size=1,
         open=False,  # Don't open in constructor (avoid deprecation warning)
+        timeout=60,
         kwargs={
             "autocommit": True,
             "prepare_threshold": 0,
+            "connect_timeout": 30,
         },
     )
 
