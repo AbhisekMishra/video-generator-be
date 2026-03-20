@@ -64,6 +64,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 class TranscribeRequest(BaseModel):
     video_url: Optional[str] = None
     video_path: Optional[str] = None
