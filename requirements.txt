@@ -12,6 +12,11 @@ python-dotenv>=1.0.0
 # Supabase client for storage operations
 supabase>=2.0.0
 
+# PyTorch - CPU only (no GPU on Render free tier, much smaller build ~200MB vs ~2GB)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.4.1+cpu
+torchaudio==2.4.1+cpu
+
 # Whisper transcription (OpenAI version - easier to install on Windows)
 openai-whisper>=20231117
 # Required for audio processing
