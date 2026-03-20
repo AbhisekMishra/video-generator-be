@@ -57,7 +57,7 @@ app = FastAPI(
 # CORS middleware for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "https://clip-ai-5py6.onrender.com"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
