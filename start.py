@@ -22,10 +22,13 @@ if __name__ == "__main__":
     print("Starting Video Generator Worker API (no reload)...")
 
     # Start without reload to test basic functionality
+    import os
+    port = int(os.environ.get("PORT", 8000))
+
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=port,
         loop="none",
         log_level="info"
     )
