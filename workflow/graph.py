@@ -1,4 +1,5 @@
 from langgraph.graph import StateGraph, END
+from langgraph.checkpoint.memory import MemorySaver
 
 from workflow.state import VideoProcessingState
 from workflow.nodes import (
@@ -14,6 +15,7 @@ async def get_pool():
 
 
 _graph_instance = None
+_checkpointer = MemorySaver()
 
 
 async def create_workflow() -> StateGraph:
@@ -30,7 +32,7 @@ async def create_workflow() -> StateGraph:
     workflow.add_edge("generateCaptions", "render")
     workflow.add_edge("render", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=_checkpointer)
 
 
 async def get_workflow() -> StateGraph:
