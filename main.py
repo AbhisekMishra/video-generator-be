@@ -30,7 +30,7 @@ from tasks.transcribe import transcribe_video
 from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.caption_generator import create_ass_file_for_clip
-from workflow.graph import get_workflow, get_pool, cleanup_connections
+from workflow.graph import get_workflow, get_pool, cleanup_connections, cleanup_thread_state
 
 
 @asynccontextmanager
@@ -405,6 +405,8 @@ async def process_video_workflow(request: ProcessVideoRequest):
                 print(f"   Error type : {type(bg_err).__name__}")
                 print(f"   Error msg  : {bg_err}")
                 print(f"   Traceback  :\n{traceback.format_exc()}")
+            finally:
+                cleanup_thread_state(session_id)
 
         asyncio.create_task(_run_workflow())
         print("  ✅ Background task started\n")

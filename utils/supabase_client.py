@@ -51,10 +51,12 @@ async def download_from_supabase(file_path: str) -> str:
                 suffix = os.path.splitext(file_path)[1] or ".mp4"
                 temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
 
-                # Write content to temp file
-                content = await resp.read()
-                temp_file.write(content)
-                temp_file.close()
+                # Stream to disk in 64 KB chunks — avoids loading entire file into RAM
+                try:
+                    async for chunk in resp.content.iter_chunked(65536):
+                        temp_file.write(chunk)
+                finally:
+                    temp_file.close()
 
                 print(f"✅ Downloaded to temporary file: {temp_file.name}")
                 return temp_file.name
@@ -81,16 +83,13 @@ def upload_to_supabase(local_file_path: str, storage_path: str) -> str:
     try:
         print(f"📤 Uploading to Supabase: {storage_path}")
 
-        # Read the file
+        # Pass the file object directly — avoids loading entire file into RAM
         with open(local_file_path, 'rb') as f:
-            file_data = f.read()
-
-        # Upload to Supabase storage
-        response = supabase.storage.from_(STORAGE_BUCKET).upload(
-            path=storage_path,
-            file=file_data,
-            file_options={"content-type": "video/mp4", "cache-control": "3600"}
-        )
+            response = supabase.storage.from_(STORAGE_BUCKET).upload(
+                path=storage_path,
+                file=f,
+                file_options={"content-type": "video/mp4", "cache-control": "3600"}
+            )
 
         # Get public URL
         public_url_response = supabase.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)

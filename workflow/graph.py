@@ -62,6 +62,22 @@ async def get_workflow() -> StateGraph:
     return _graph_instance
 
 
+def cleanup_thread_state(thread_id: str) -> None:
+    """Free MemorySaver checkpoint data for a completed workflow thread."""
+    global _checkpointer_instance
+    if _checkpointer_instance is None:
+        return
+    storage = getattr(_checkpointer_instance, 'storage', {})
+    keys = [k for k in list(storage) if k[0] == thread_id]
+    for k in keys:
+        del storage[k]
+    writes = getattr(_checkpointer_instance, 'writes', {})
+    wkeys = [k for k in list(writes) if k[0] == thread_id]
+    for k in wkeys:
+        del writes[k]
+    print(f"🧹 Freed {len(keys)} checkpoint(s) for thread {thread_id}")
+
+
 async def cleanup_connections():
     global _checkpointer_instance, _graph_instance
     _checkpointer_instance = None

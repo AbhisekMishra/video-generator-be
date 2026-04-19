@@ -16,6 +16,17 @@ _ASSETS_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), '..', 'ut
 _LOGO_SVG = os.path.join(_ASSETS_DIR, 'logo.svg')
 _LOGO_PNG = os.path.join(_ASSETS_DIR, 'logo.png')   # pre-rendered drop-in
 
+# Cached logo path — generated once per process lifetime to avoid repeated Pillow/SVG work
+_cached_logo_png: Optional[str] = None
+
+
+def get_logo_png() -> Optional[str]:
+    global _cached_logo_png
+    if _cached_logo_png and os.path.exists(_cached_logo_png):
+        return _cached_logo_png
+    _cached_logo_png = _logo_as_png()
+    return _cached_logo_png
+
 
 def _pillow_am_logo(png_path: str) -> bool:
     """
@@ -309,7 +320,7 @@ async def render_video(
         next_input_idx = 1
 
         # Step B: logo overlay (optional — requires cairosvg or svglib)
-        logo_png_path = _logo_as_png()
+        logo_png_path = get_logo_png()
         if logo_png_path and os.path.exists(logo_png_path):
             logo_display_h = max(30, top_gap - 20)               # fills ~80% of top gap
             logo_y = (top_gap - logo_display_h) // 2             # vertically centred in gap
@@ -384,7 +395,11 @@ async def render_video(
         return {"output_path": output_path, "duration": duration}
 
     finally:
-        if logo_png_path and os.path.exists(logo_png_path):
+        # Don't delete the cached logo (permanent asset or reused temp PNG)
+        if (logo_png_path
+                and logo_png_path != _LOGO_PNG
+                and logo_png_path != _cached_logo_png
+                and os.path.exists(logo_png_path)):
             try:
                 os.remove(logo_png_path)
             except Exception:
