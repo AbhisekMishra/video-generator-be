@@ -405,8 +405,6 @@ async def process_video_workflow(request: ProcessVideoRequest):
                 print(f"   Error type : {type(bg_err).__name__}")
                 print(f"   Error msg  : {bg_err}")
                 print(f"   Traceback  :\n{traceback.format_exc()}")
-            finally:
-                cleanup_thread_state(session_id)
 
         asyncio.create_task(_run_workflow())
         print("  ✅ Background task started\n")
@@ -495,6 +493,7 @@ async def stream_video_processing(session_id: str):
                                 "renderedVideos": values.get("renderedVideos")
                             })
                         }
+                        cleanup_thread_state(session_id)
                         break
 
                 # Wait before next check
