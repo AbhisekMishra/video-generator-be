@@ -16,7 +16,7 @@ from tasks.transcribe import transcribe_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
-from utils.supabase_client import update_session_model, update_session_status, update_session_clips_metadata
+from utils.supabase_client import update_session_model, update_session_status, complete_session
 from tasks.render import render_video
 
 
@@ -481,7 +481,8 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         print(f"🎉 All {len(rendered_videos)} clips rendered successfully!")
 
-        # Persist clip metadata so regeneration can exclude these time ranges
+        # Persist clip URLs and metadata
+        clip_paths = [rv["url"] for rv in rendered_videos]
         clips_metadata = [
             {
                 "start": rv["clip"]["start"],
@@ -494,8 +495,7 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
         ]
 
         if session_id:
-            update_session_clips_metadata(session_id, clips_metadata)
-            update_session_status(session_id, "completed", completed=True)
+            complete_session(session_id, clip_paths, clips_metadata)
 
         return {
             "renderedVideos": rendered_videos,

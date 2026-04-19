@@ -134,6 +134,23 @@ def update_session_clips_metadata(session_id: str, clips_metadata: list) -> None
         print(f"⚠️  Failed to update session clips_metadata: {e}")
 
 
+def complete_session(session_id: str, clip_paths: list, clips_metadata: list) -> None:
+    """Mark session as completed and persist clip URLs and metadata (queried by id)."""
+    from datetime import datetime, timezone
+    try:
+        supabase.table("sessions").update({
+            "status": "completed",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "clip_paths": clip_paths,
+            "clips_metadata": clips_metadata,
+            "progress": 100,
+            "current_stage": "completed",
+        }).eq("id", session_id).execute()
+        print(f"✅ Session {session_id}: completed with {len(clip_paths)} clips")
+    except Exception as e:
+        print(f"⚠️  Failed to complete session: {e}")
+
+
 def delete_from_supabase(storage_path: str) -> bool:
     """
     Delete a file from Supabase storage.
