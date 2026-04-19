@@ -411,6 +411,30 @@ async def process_video_workflow(request: ProcessVideoRequest):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
+@app.get("/process-video/status/{session_id}")
+async def get_processing_status(session_id: str):
+    """Poll current workflow state from the checkpointer."""
+    workflow = await get_workflow()
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        snapshot = await workflow.aget_state(config)
+        values = snapshot.values if snapshot else {}
+        current_stage = values.get("currentStage")
+        all_errors = values.get("errors") or []
+        errors = [e for e in all_errors if e and str(e).strip()]
+        return {
+            "session_id": session_id,
+            "current_stage": current_stage,
+            "is_complete": current_stage == "completed",
+            "clips": values.get("clips"),
+            "captions": values.get("captions"),
+            "rendered_videos": values.get("renderedVideos"),
+            "errors": errors or None,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000, loop="none")
