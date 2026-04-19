@@ -28,20 +28,5 @@ langchain-core>=0.3.28
 # Server-Sent Events support
 sse-starlette>=2.1.3
 
-# SVG → PNG conversion for logo overlay in rendered videos.
-# Backends tried in order (most reliable first):
-#
-#   Backend 0 — pre-rendered logo.png in utils/assets/ (zero deps — recommended for Windows)
-#
-#   Backend 1 — cairosvg (best SVG quality, needs native Cairo):
-#     Linux : apt install libcairo2 && pip install cairosvg
-#     macOS : brew install cairo    && pip install cairosvg
-#     Windows: requires GTK runtime (https://cairosvg.org/documentation/)
-cairosvg>=2.7.0
-#
-#   Backend 2 — svglib + reportlab (needs reportlab _renderPM C extension):
-svglib>=1.5.1
-reportlab>=4.0.0
-#
-#   Backend 3 — Pillow (pure Python, generates styled text logo; works everywhere):
+# Logo overlay: Pillow renders the AM logo geometry in pure Python (no native libs needed)
 Pillow>=10.0.0
