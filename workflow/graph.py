@@ -1,13 +1,4 @@
-"""
-LangGraph Workflow Definition
-
-Uses MemorySaver checkpointing (no PostgreSQL dependency).
-Works on Render free tier which only supports IPv4.
-"""
-
-from typing import Optional
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 
 from workflow.state import VideoProcessingState
 from workflow.nodes import (
@@ -18,19 +9,11 @@ from workflow.nodes import (
 )
 
 
-_checkpointer_instance: Optional[MemorySaver] = None
-
-
-def get_checkpointer() -> MemorySaver:
-    global _checkpointer_instance
-    if _checkpointer_instance is None:
-        _checkpointer_instance = MemorySaver()
-    return _checkpointer_instance
-
-
 async def get_pool():
-    """No-op: pool no longer used with MemorySaver."""
     return None
+
+
+_graph_instance = None
 
 
 async def create_workflow() -> StateGraph:
@@ -47,10 +30,7 @@ async def create_workflow() -> StateGraph:
     workflow.add_edge("generateCaptions", "render")
     workflow.add_edge("render", END)
 
-    return workflow.compile(checkpointer=get_checkpointer())
-
-
-_graph_instance: Optional[StateGraph] = None
+    return workflow.compile()
 
 
 async def get_workflow() -> StateGraph:
@@ -62,23 +42,6 @@ async def get_workflow() -> StateGraph:
     return _graph_instance
 
 
-def cleanup_thread_state(thread_id: str) -> None:
-    """Free MemorySaver checkpoint data for a completed workflow thread."""
-    global _checkpointer_instance
-    if _checkpointer_instance is None:
-        return
-    storage = getattr(_checkpointer_instance, 'storage', {})
-    keys = [k for k in list(storage) if k[0] == thread_id]
-    for k in keys:
-        del storage[k]
-    writes = getattr(_checkpointer_instance, 'writes', {})
-    wkeys = [k for k in list(writes) if k[0] == thread_id]
-    for k in wkeys:
-        del writes[k]
-    print(f"🧹 Freed {len(keys)} checkpoint(s) for thread {thread_id}")
-
-
 async def cleanup_connections():
-    global _checkpointer_instance, _graph_instance
-    _checkpointer_instance = None
+    global _graph_instance
     _graph_instance = None
