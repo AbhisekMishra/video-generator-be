@@ -17,10 +17,8 @@ from typing import Optional, List
 from contextlib import asynccontextmanager
 import uvicorn
 import os
-import json
 import uuid
 from dotenv import load_dotenv
-from sse_starlette.sse import EventSourceResponse
 from schemas import ClipSchema, CaptionDataSchema, RenderedVideoSchema, TranscriptWordSchema
 
 # Load environment variables from .env file
@@ -362,13 +360,11 @@ class StatusResponse(BaseModel):
     is_complete: bool
 
 
-@app.post("/process-video", response_model=ProcessVideoResponse)
+@app.post("/process-video", response_model=ProcessVideoResponse, status_code=202)
 async def process_video_workflow(request: ProcessVideoRequest):
     """
-    Start video processing workflow using LangGraph.
-
-    This endpoint starts the workflow and returns immediately with a session ID.
-    Use the /process-video/stream endpoint to get real-time status updates via SSE.
+    Start video processing workflow. Returns 202 immediately; poll the session
+    status via Supabase to track progress.
     """
     import traceback
 
@@ -376,18 +372,10 @@ async def process_video_workflow(request: ProcessVideoRequest):
     print(f"\n🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
-        print("  [1/4] Getting workflow...")
         workflow = await get_workflow()
-        print("  ✅ Workflow ready")
+        await get_pool()
 
         config = {"configurable": {"thread_id": session_id}}
-
-        print("  [2/3] Initialising DB pool (model usage tracking)...")
-        await get_pool()
-        print("  ✅ Pool ready")
-
-        print("  [3/3] Launching background workflow task...")
-
         existing_clips = [c.model_dump() for c in request.existing_clips] if request.existing_clips else []
 
         async def _run_workflow():
@@ -405,13 +393,15 @@ async def process_video_workflow(request: ProcessVideoRequest):
                 print(f"   Error type : {type(bg_err).__name__}")
                 print(f"   Error msg  : {bg_err}")
                 print(f"   Traceback  :\n{traceback.format_exc()}")
+            finally:
+                cleanup_thread_state(session_id)
 
         asyncio.create_task(_run_workflow())
-        print("  ✅ Background task started\n")
+        print(f"  ✅ Background task started for session {session_id}\n")
 
         return {
             "session_id": session_id,
-            "status": "started",
+            "status": "accepted",
             "message": f"Video processing started for session {session_id}"
         }
 
@@ -422,99 +412,6 @@ async def process_video_workflow(request: ProcessVideoRequest):
         print(f"   Traceback  :\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
-
-@app.get("/process-video/stream")
-async def stream_video_processing(session_id: str):
-    """
-    Stream real-time status updates using Server-Sent Events (SSE).
-
-    The client should connect to this endpoint AFTER starting the workflow
-    to receive live updates about the processing progress.
-
-    Events sent:
-    - connected: Initial connection confirmation
-    - status: Processing status update
-    - complete: Processing completed successfully
-    - error: An error occurred
-    - timeout: Stream timeout (after 10 minutes)
-    """
-    async def event_generator():
-        workflow = await get_workflow()
-        config = {"configurable": {"thread_id": session_id}}
-
-        previous_stage = None
-        retry_count = 0
-        max_retries = 600  # 10 minutes with 1-second intervals
-
-        # Send initial connection message
-        yield {
-            "event": "connected",
-            "data": json.dumps({"message": "Connected to status stream", "sessionId": session_id})
-        }
-
-        while retry_count < max_retries:
-            try:
-                # Get current state
-                state_snapshot = await workflow.aget_state(config)
-                values = state_snapshot.values
-
-                current_stage = values.get("currentStage")
-
-                # Send update if something changed
-                if current_stage != previous_stage:
-                    # Filter out empty/null errors
-                    all_errors = values.get("errors", [])
-                    filtered_errors = [e for e in (all_errors or []) if e and str(e).strip()]
-
-                    event_data = {
-                        "sessionId": session_id,
-                        "currentStage": current_stage,
-                        "clips": values.get("clips"),
-                        "captions": values.get("captions"),
-                        "renderedVideos": values.get("renderedVideos"),
-                        "errors": filtered_errors if filtered_errors else None,
-                        "isComplete": current_stage == "completed",
-                        "timestamp": asyncio.get_event_loop().time()
-                    }
-
-                    yield {
-                        "event": "status",
-                        "data": json.dumps(event_data)
-                    }
-
-                    previous_stage = current_stage
-
-                    # Stop streaming when complete
-                    if current_stage == "completed":
-                        yield {
-                            "event": "complete",
-                            "data": json.dumps({
-                                "message": "Processing complete",
-                                "renderedVideos": values.get("renderedVideos")
-                            })
-                        }
-                        cleanup_thread_state(session_id)
-                        break
-
-                # Wait before next check
-                await asyncio.sleep(1)
-                retry_count += 1
-
-            except Exception as e:
-                yield {
-                    "event": "error",
-                    "data": json.dumps({"error": str(e)})
-                }
-                break
-
-        # Timeout if max retries reached
-        if retry_count >= max_retries:
-            yield {
-                "event": "timeout",
-                "data": json.dumps({"message": "Stream timeout after 10 minutes"})
-            }
-
-    return EventSourceResponse(event_generator())
 
 
 if __name__ == "__main__":
