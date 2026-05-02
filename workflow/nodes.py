@@ -17,6 +17,7 @@ from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
 from utils.supabase_client import update_session_model, update_session_status, update_session_clips_metadata
+from utils.youtube import is_youtube_url, download_youtube_video
 from tasks.render import render_video
 
 
@@ -42,37 +43,66 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
     print(f"  Video Path: {state.get('videoPath')}")
     print(f"  Session ID: {state.get('sessionId')}")
 
+    video_url = state.get("videoUrl")
+    video_path = state.get("videoPath")
+    session_id = state.get("sessionId")
+    local_yt_path = None
+
     try:
+        # If the video URL is a YouTube link, download it first and re-host on Supabase
+        # so the render node can access it later via the same URL.
+        if video_url and is_youtube_url(video_url):
+            print(f"🎬 YouTube URL detected — downloading before transcription...")
+            local_yt_path = await download_youtube_video(video_url)
+
+            # Upload to Supabase so render node can fetch it
+            storage_path = f"sessions/{session_id}/original/video.mp4"
+            supabase_url = upload_to_supabase(local_yt_path, storage_path)
+            print(f"✅ YouTube video uploaded to Supabase: {supabase_url}")
+
+            # Switch to local path for transcription, Supabase URL for rest of pipeline
+            video_path = local_yt_path
+            video_url = supabase_url
+
         # Call the transcription task (this does the actual work)
         result = await transcribe_video(
-            video_url=state.get("videoUrl"),
-            video_path=state.get("videoPath")
+            video_url=video_url if not video_path else None,
+            video_path=video_path
         )
 
         print(f"✅ Transcription successful! Got {len(result.get('words', []))} words")
 
-        # Return updates to merge into workflow state
-        # LangGraph will automatically merge this dict into the existing state
-        return {
+        # Cleanup local YouTube download now that transcription is done
+        if local_yt_path and os.path.exists(local_yt_path):
+            os.remove(local_yt_path)
+
+        updates: Dict[str, Any] = {
             "transcript": {
-                "text": result["text"],              # Full transcript text
-                "words": result.get("words", []),     # Word-level timestamps
-                "language": result.get("language")    # Detected language
+                "text": result["text"],
+                "words": result.get("words", []),
+                "language": result.get("language")
             },
-            "currentStage": "identifyClips"  # Tell LangGraph to move to next stage
+            "currentStage": "identifyClips",
         }
+        # Propagate the Supabase URL so render node uses it instead of YouTube URL
+        if video_url != state.get("videoUrl"):
+            updates["videoUrl"] = video_url
+
+        return updates
+
     except Exception as e:
-        # Python's exception handling (like try/catch in JavaScript)
         import traceback
+        if local_yt_path and os.path.exists(local_yt_path):
+            os.remove(local_yt_path)
+
         print(f"❌ ERROR: Transcription failed!")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
 
-        # Return error state (stays on current stage for retry)
         return {
             "errors": [str(e)],
-            "currentStage": "transcribe"  # Stay on this stage
+            "currentStage": "transcribe"
         }
 
 

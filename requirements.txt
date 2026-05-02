@@ -27,3 +27,6 @@ langchain-core>=0.3.28
 
 # Logo overlay: Pillow renders the AM logo geometry in pure Python (no native libs needed)
 Pillow>=10.0.0
+
+# YouTube video download
+yt-dlp>=2024.1.0
