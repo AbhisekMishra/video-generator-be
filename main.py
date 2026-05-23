@@ -29,6 +29,7 @@ from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.caption_generator import create_ass_file_for_clip
 from workflow.graph import get_workflow, get_pool, cleanup_connections
+from utils.quota import verify_session_owner, check_and_increment_quota
 
 
 @asynccontextmanager
@@ -341,6 +342,7 @@ class ExistingClipSchema(BaseModel):
 class ProcessVideoRequest(BaseModel):
     video_url: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None
     existing_clips: Optional[List[ExistingClipSchema]] = None
 
 
@@ -372,6 +374,12 @@ async def process_video_workflow(request: ProcessVideoRequest):
     print(f"\n🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
+        # Verify session ownership and enforce quota when user_id is provided
+        if request.user_id:
+            if request.session_id:
+                verify_session_owner(request.session_id, request.user_id)
+            check_and_increment_quota(request.user_id)
+
         workflow = await get_workflow()
         await get_pool()
 
@@ -409,6 +417,30 @@ async def process_video_workflow(request: ProcessVideoRequest):
         print(f"   Error msg  : {e}")
         print(f"   Traceback  :\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
+
+
+@app.get("/process-video/status/{session_id}")
+async def get_processing_status(session_id: str):
+    """Poll current workflow state from the checkpointer."""
+    workflow = await get_workflow()
+    config = {"configurable": {"thread_id": session_id}}
+    try:
+        snapshot = await workflow.aget_state(config)
+        values = snapshot.values if snapshot else {}
+        current_stage = values.get("currentStage")
+        all_errors = values.get("errors") or []
+        errors = [e for e in all_errors if e and str(e).strip()]
+        return {
+            "session_id": session_id,
+            "current_stage": current_stage,
+            "is_complete": current_stage == "completed",
+            "clips": values.get("clips"),
+            "captions": values.get("captions"),
+            "rendered_videos": values.get("renderedVideos"),
+            "errors": errors or None,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 

@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional, Dict
 import subprocess
 
-from utils.file_utils import cleanup_file
+from utils.file_utils import cleanup_file, is_youtube_url, download_youtube_video
 
 # ── Gap proportions (fraction of source video height) ────────────────────────
 # Applied at render time based on actual source dimensions.
@@ -278,12 +278,18 @@ async def render_video(
     """
     logo_png_path = None
     output_path = None
+    downloaded_video_path = None
 
     try:
         # ── 1. Resolve input ──────────────────────────────────────────────
-        # FFmpeg and ffprobe support HTTP/HTTPS URLs natively — no download needed
         if video_url:
-            input_path = video_url
+            if is_youtube_url(video_url):
+                print(f"📥 Downloading YouTube video: {video_url}")
+                downloaded_video_path = await download_youtube_video(video_url)
+                input_path = downloaded_video_path
+                print(f"✅ YouTube video downloaded to: {input_path}")
+            else:
+                input_path = video_url
         elif video_path:
             input_path = video_path
             if not os.path.exists(input_path):
@@ -405,3 +411,5 @@ async def render_video(
             except Exception:
                 pass
         # output_path is intentionally NOT cleaned up — it's the result
+        if downloaded_video_path:
+            await cleanup_file(downloaded_video_path)

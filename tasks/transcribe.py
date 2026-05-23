@@ -4,7 +4,7 @@ import asyncio
 from typing import Optional, Dict
 from faster_whisper import WhisperModel
 
-from utils.file_utils import cleanup_file
+from utils.file_utils import cleanup_file, is_youtube_url, download_youtube_video
 
 
 _whisper_model = None
@@ -34,10 +34,17 @@ async def transcribe_video(
         Dictionary with text, words, and language
     """
     temp_audio_path = None
+    downloaded_video_path = None
 
     try:
         if video_url:
-            input_path = video_url
+            if is_youtube_url(video_url):
+                print(f"📥 Downloading YouTube video: {video_url}")
+                downloaded_video_path = await download_youtube_video(video_url)
+                input_path = downloaded_video_path
+                print(f"✅ YouTube video downloaded to: {input_path}")
+            else:
+                input_path = video_url
         elif video_path:
             input_path = video_path
             if not os.path.exists(input_path):
@@ -113,3 +120,5 @@ async def transcribe_video(
     finally:
         if temp_audio_path:
             await cleanup_file(temp_audio_path)
+        if downloaded_video_path:
+            await cleanup_file(downloaded_video_path)

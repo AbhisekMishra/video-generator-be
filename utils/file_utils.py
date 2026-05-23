@@ -1,8 +1,55 @@
 import os
+import re
 import tempfile
 import asyncio
 import aiohttp
 from typing import Optional
+
+_YOUTUBE_PATTERN = re.compile(
+    r'(youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)'
+)
+
+
+def is_youtube_url(url: str) -> bool:
+    return bool(_YOUTUBE_PATTERN.search(url))
+
+
+async def download_youtube_video(url: str) -> str:
+    """
+    Download a YouTube video using yt-dlp. Returns path to the downloaded file.
+    Caller is responsible for cleanup.
+    """
+    import yt_dlp
+
+    temp_dir = tempfile.mkdtemp()
+    output_template = os.path.join(temp_dir, 'video.%(ext)s')
+
+    ydl_opts = {
+        # Cap at 480p to keep rendered clips well under Supabase's 50 MB upload limit.
+        # 480p is sufficient for 9:16 short-form clips and dramatically reduces file size vs 1080p.
+        'format': (
+            'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]'
+            '/best[height<=480][ext=mp4]'
+            '/best[height<=480]'
+            '/worst'
+        ),
+        'outtmpl': output_template,
+        'merge_output_format': 'mp4',
+        'quiet': False,
+        'no_warnings': False,
+    }
+
+    def _download():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+    await asyncio.to_thread(_download)
+
+    files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+    if not files:
+        raise RuntimeError(f"yt-dlp produced no output for: {url}")
+
+    return files[0]
 
 
 async def download_video(url: str) -> str:

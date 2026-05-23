@@ -13,11 +13,11 @@ from langchain_openai import ChatOpenAI
 
 from workflow.state import VideoProcessingState, Clip
 from tasks.transcribe import transcribe_video
+from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
-from utils.supabase_client import update_session_model, update_session_status, update_session_clips_metadata
-from utils.youtube import is_youtube_url, download_youtube_video
+from utils.supabase_client import update_session_model, update_session_status, complete_session
 from tasks.render import render_video
 
 
@@ -44,37 +44,21 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
     print(f"  Session ID: {state.get('sessionId')}")
 
     video_url = state.get("videoUrl")
-    video_path = state.get("videoPath")
-    session_id = state.get("sessionId")
-    local_yt_path = None
+    local_video_path = None
 
     try:
-        # If the video URL is a YouTube link, download it first and re-host on Supabase
-        # so the render node can access it later via the same URL.
+        # Download YouTube videos once here so render_node can reuse the same file
         if video_url and is_youtube_url(video_url):
-            print(f"🎬 YouTube URL detected — downloading before transcription...")
-            local_yt_path = await download_youtube_video(video_url)
+            print(f"📥 Downloading YouTube video (once for full pipeline): {video_url}")
+            local_video_path = await download_youtube_video(video_url)
+            print(f"✅ YouTube video downloaded to: {local_video_path}")
 
-            # Upload to Supabase so render node can fetch it
-            storage_path = f"sessions/{session_id}/original/video.mp4"
-            supabase_url = upload_to_supabase(local_yt_path, storage_path)
-            print(f"✅ YouTube video uploaded to Supabase: {supabase_url}")
-
-            # Switch to local path for transcription, Supabase URL for rest of pipeline
-            video_path = local_yt_path
-            video_url = supabase_url
-
-        # Call the transcription task (this does the actual work)
         result = await transcribe_video(
-            video_url=video_url if not video_path else None,
-            video_path=video_path
+            video_url=video_url if not local_video_path else None,
+            video_path=local_video_path or state.get("videoPath")
         )
 
         print(f"✅ Transcription successful! Got {len(result.get('words', []))} words")
-
-        # Cleanup local YouTube download now that transcription is done
-        if local_yt_path and os.path.exists(local_yt_path):
-            os.remove(local_yt_path)
 
         updates: Dict[str, Any] = {
             "transcript": {
@@ -82,23 +66,22 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
                 "words": result.get("words", []),
                 "language": result.get("language")
             },
-            "currentStage": "identifyClips",
+            "localVideoPath": local_video_path,  # None for non-YouTube; render_node reuses this
+            "currentStage": "identifyClips"
         }
-        # Propagate the Supabase URL so render node uses it instead of YouTube URL
-        if video_url != state.get("videoUrl"):
-            updates["videoUrl"] = video_url
 
         return updates
 
     except Exception as e:
         import traceback
-        if local_yt_path and os.path.exists(local_yt_path):
-            os.remove(local_yt_path)
-
         print(f"❌ ERROR: Transcription failed!")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
+
+        # Clean up the downloaded file if transcription failed
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
 
         return {
             "errors": [str(e)],
@@ -439,8 +422,10 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
     clips = state.get("clips")
     captions = state.get("captions")
     session_id = state.get("sessionId")
-    video_url = state.get("videoUrl")
-    video_path = state.get("videoPath")
+    local_video_path = state.get("localVideoPath")  # pre-downloaded YouTube file from transcribe_node
+    # If transcribe_node already downloaded the video, use that local file; avoids re-downloading per clip
+    video_url = None if local_video_path else state.get("videoUrl")
+    video_path = local_video_path or state.get("videoPath")
 
     if not clips:
         print("ERROR: No clips available")
@@ -511,7 +496,13 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         print(f"🎉 All {len(rendered_videos)} clips rendered successfully!")
 
-        # Persist clip metadata so regeneration can exclude these time ranges
+        # Clean up the pre-downloaded YouTube video now that all clips are rendered
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
+            print(f"🗑️  Cleaned up downloaded video: {local_video_path}")
+
+        # Persist clip URLs and metadata
+        clip_paths = [rv["url"] for rv in rendered_videos]
         clips_metadata = [
             {
                 "start": rv["clip"]["start"],
@@ -524,8 +515,7 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
         ]
 
         if session_id:
-            update_session_clips_metadata(session_id, clips_metadata)
-            update_session_status(session_id, "completed", completed=True)
+            complete_session(session_id, clip_paths, clips_metadata)
 
         return {
             "renderedVideos": rendered_videos,
@@ -537,6 +527,9 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
         print(f"ERROR: Rendering failed!")
         print(f"Error: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
+
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
 
         if session_id:
             update_session_status(session_id, "failed")
