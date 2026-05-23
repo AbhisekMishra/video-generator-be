@@ -60,9 +60,7 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         print(f"✅ Transcription successful! Got {len(result.get('words', []))} words")
 
-        # Return updates to merge into workflow state
-        # LangGraph will automatically merge this dict into the existing state
-        return {
+        updates: Dict[str, Any] = {
             "transcript": {
                 "text": result["text"],
                 "words": result.get("words", []),
@@ -71,6 +69,9 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
             "localVideoPath": local_video_path,  # None for non-YouTube; render_node reuses this
             "currentStage": "identifyClips"
         }
+
+        return updates
+
     except Exception as e:
         import traceback
         print(f"❌ ERROR: Transcription failed!")
