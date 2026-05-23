@@ -39,11 +39,15 @@ async def download_youtube_video(url: str) -> str:
 
     output_path = tempfile.mktemp(suffix=".mp4")
 
+    # Use android player client to bypass bot-detection on server/datacenter IPs.
+    # Fall back through tv_embedded -> web if android also fails.
     cmd = [
         "yt-dlp",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
         "--merge-output-format", "mp4",
         "--no-playlist",
+        "--extractor-args", "youtube:player_client=android,tv_embedded,web",
+        "--no-check-certificate",
         "-o", output_path,
         url,
     ]
