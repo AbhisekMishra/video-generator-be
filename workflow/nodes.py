@@ -163,12 +163,16 @@ For each clip provide:
 - reason: why this clip is engaging
 - hook: the catchy opening line or topic
 - title: a short catchy header (3-5 words) shown at the top of the video
-- points: exactly 5 single impactful words from this clip's spoken dialogue. These appear as numbered bullets on screen when each word is spoken.
+- points: exactly 5 single HIGH-IMPACT words from this clip's spoken dialogue. These appear as numbered bullets on screen — they must make a viewer stop scrolling.
   Rules for points:
   * Every word MUST actually be spoken in this clip
-  * NO filler or stop words: avoid "and", "the", "a", "so", "then", "just", "like", "okay", "yeah", "is", "it", "in", "on", "at", "to", "or", "but", "we", "i", "you", "he", "she", "they", "um", "uh", "got", "get", "gonna", "well", "now", "here", "there", "very", "really"
-  * Choose nouns, verbs, or adjectives that are surprising, emotional, or meaningful
-  * The 5 words should collectively tell the story of the clip
+  * ABSOLUTE BAN — never use these: "and", "the", "a", "an", "so", "then", "just", "like", "okay", "yeah", "yes", "no", "is", "it", "in", "on", "at", "to", "or", "but", "we", "i", "you", "he", "she", "they", "um", "uh", "got", "get", "gonna", "well", "now", "here", "there", "very", "really", "actually", "basically", "literally", "things", "something", "anything", "everything", "people", "person", "time", "way", "make", "made", "said", "says", "want", "wanted", "need", "know", "think", "thought", "feel", "felt", "went", "come", "came", "look", "looked", "right", "good", "great", "bad", "big", "new", "old", "first", "last", "one", "two", "three", "also", "even", "still", "back", "over", "about", "because", "when", "what", "that", "this", "these", "those"
+  * PREFER words that are: shocking, counterintuitive, emotionally charged, highly specific, or reveal something unexpected
+  * STRONG word types: concrete nouns (a specific person/place/thing), vivid action verbs, stark adjectives with strong connotation
+  * ASK YOURSELF: "If someone saw only this word on screen, would it make them curious or emotional?" — only use it if the answer is YES
+  * The 5 words together should feel like a teaser that hints at the clip's core revelation or emotion
+  * BAD example: ["make", "things", "really", "good", "time"] — generic, forgettable
+  * GOOD example: ["betrayed", "collapsed", "millions", "exposed", "survived"] — specific, visceral, curiosity-inducing
 
 Return your response as a JSON array of clips. Example:
 [
