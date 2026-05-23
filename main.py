@@ -28,8 +28,9 @@ from tasks.transcribe import transcribe_video
 from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.caption_generator import create_ass_file_for_clip
-from workflow.graph import get_workflow, get_pool, cleanup_connections
-from utils.quota import verify_session_owner, check_and_increment_quota
+from workflow.graph import get_workflow, cleanup_connections
+from utils.quota import verify_session_owner
+from utils.queue_manager import enqueue_job, get_queue_status, start_worker, stop_worker
 
 
 @asynccontextmanager
@@ -39,11 +40,12 @@ async def lifespan(app: FastAPI):
 
     Handles startup and shutdown events.
     """
-    # Startup: Initialize workflow (lazy initialization will happen on first use)
     print("Starting up Video Generator Worker API...")
+    start_worker()
     yield
-    # Shutdown: Cleanup database connections
+    # Shutdown: stop queue worker then cleanup DB connections
     print("Shutting down application...")
+    stop_worker()
     await cleanup_connections()
     print("Cleanup complete")
 
@@ -350,6 +352,8 @@ class ProcessVideoResponse(BaseModel):
     session_id: str
     status: str
     message: str
+    queue_position: Optional[int] = None
+    estimated_wait_seconds: Optional[int] = None
 
 
 class StatusResponse(BaseModel):
@@ -365,8 +369,9 @@ class StatusResponse(BaseModel):
 @app.post("/process-video", response_model=ProcessVideoResponse, status_code=202)
 async def process_video_workflow(request: ProcessVideoRequest):
     """
-    Start video processing workflow. Returns 202 immediately; poll the session
-    status via Supabase to track progress.
+    Enqueue a video processing job. Returns 202 immediately with queue position.
+    Poll the session status via Supabase or GET /process-video/queue-position/{session_id}
+    to track progress.
     """
     import traceback
 
@@ -374,43 +379,41 @@ async def process_video_workflow(request: ProcessVideoRequest):
     print(f"\n🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
-        # Verify session ownership and enforce quota when user_id is provided
-        if request.user_id:
-            if request.session_id:
-                verify_session_owner(request.session_id, request.user_id)
-            check_and_increment_quota(request.user_id)
+        # Verify session ownership when user_id is provided
+        if request.user_id and request.session_id:
+            verify_session_owner(request.session_id, request.user_id)
 
-        workflow = await get_workflow()
-        await get_pool()
-
-        config = {"configurable": {"thread_id": session_id}}
         existing_clips = [c.model_dump() for c in request.existing_clips] if request.existing_clips else []
 
-        async def _run_workflow():
-            try:
-                await workflow.ainvoke(
-                    {
-                        "videoUrl": request.video_url,
-                        "sessionId": session_id,
-                        "existingClips": existing_clips,
-                    },
-                    config
-                )
-            except Exception as bg_err:
-                print(f"\n❌ Background workflow FAILED  session={session_id}")
-                print(f"   Error type : {type(bg_err).__name__}")
-                print(f"   Error msg  : {bg_err}")
-                print(f"   Traceback  :\n{traceback.format_exc()}")
+        queue_info = await enqueue_job(
+            user_id=request.user_id or "anonymous",
+            session_id=session_id,
+            payload={
+                "video_url": request.video_url,
+                "existing_clips": existing_clips,
+            },
+        )
 
-        asyncio.create_task(_run_workflow())
-        print(f"  ✅ Background task started for session {session_id}\n")
+        print(
+            f"  ✅ Job queued  session={session_id}"
+            f"  position={queue_info['queue_position']}\n"
+        )
 
         return {
             "session_id": session_id,
-            "status": "accepted",
-            "message": f"Video processing started for session {session_id}"
+            "status": "queued",
+            "message": f"Job queued at position {queue_info['queue_position']}",
+            "queue_position": queue_info["queue_position"],
+            "estimated_wait_seconds": queue_info["estimated_wait_seconds"],
         }
 
+    except ValueError as e:
+        if str(e) == "duplicate_job":
+            raise HTTPException(
+                status_code=429,
+                detail="You already have an active job. Please wait for it to complete.",
+            )
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         print(f"\n❌ /process-video FAILED at session={session_id}")
         print(f"   Error type : {type(e).__name__}")
@@ -439,6 +442,20 @@ async def get_processing_status(session_id: str):
             "rendered_videos": values.get("renderedVideos"),
             "errors": errors or None,
         }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/process-video/queue-position/{session_id}")
+async def get_queue_position(session_id: str):
+    """Return the current queue position and estimated wait for a session."""
+    try:
+        status = await get_queue_status(session_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="No queue entry found for this session")
+        return {"session_id": session_id, **status}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
