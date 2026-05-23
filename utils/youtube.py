@@ -28,6 +28,19 @@ def extract_video_id(url: str) -> Optional[str]:
     return None
 
 
+def _write_cookies_file() -> Optional[str]:
+    """Write YOUTUBE_COOKIES env var to a temp Netscape-format cookie file. Returns path or None."""
+    cookies_content = os.getenv("YOUTUBE_COOKIES", "").strip()
+    if not cookies_content:
+        return None
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+    if not cookies_content.startswith("# Netscape HTTP Cookie File"):
+        tmp.write("# Netscape HTTP Cookie File\n")
+    tmp.write(cookies_content)
+    tmp.close()
+    return tmp.name
+
+
 async def download_youtube_video(url: str) -> str:
     """
     Download a YouTube video to a temp MP4 file using yt-dlp.
@@ -38,9 +51,8 @@ async def download_youtube_video(url: str) -> str:
     import subprocess
 
     output_path = tempfile.mktemp(suffix=".mp4")
+    cookies_file = _write_cookies_file()
 
-    # Use android player client to bypass bot-detection on server/datacenter IPs.
-    # Fall back through tv_embedded -> web if android also fails.
     cmd = [
         "yt-dlp",
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
@@ -48,17 +60,27 @@ async def download_youtube_video(url: str) -> str:
         "--no-playlist",
         "--extractor-args", "youtube:player_client=android,tv_embedded,web",
         "--no-check-certificate",
-        "-o", output_path,
-        url,
     ]
+
+    if cookies_file:
+        cmd += ["--cookies", cookies_file]
+        print("🍪 Using YouTube cookies for authentication")
+    else:
+        print("⚠️  No YOUTUBE_COOKIES env var set — download may fail on server IPs")
+
+    cmd += ["-o", output_path, url]
 
     print(f"⬇️  Downloading YouTube video: {url}")
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-    )
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        )
+    finally:
+        if cookies_file and os.path.exists(cookies_file):
+            os.remove(cookies_file)
 
     if result.returncode != 0:
         raise RuntimeError(
