@@ -29,6 +29,7 @@ from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.caption_generator import create_ass_file_for_clip
 from workflow.graph import get_workflow, get_pool, cleanup_connections
+from utils.quota import verify_session_owner, check_and_increment_quota
 
 
 @asynccontextmanager
@@ -341,6 +342,7 @@ class ExistingClipSchema(BaseModel):
 class ProcessVideoRequest(BaseModel):
     video_url: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None
     existing_clips: Optional[List[ExistingClipSchema]] = None
 
 
@@ -372,6 +374,12 @@ async def process_video_workflow(request: ProcessVideoRequest):
     print(f"\n🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
+        # Verify session ownership and enforce quota when user_id is provided
+        if request.user_id:
+            if request.session_id:
+                verify_session_owner(request.session_id, request.user_id)
+            check_and_increment_quota(request.user_id)
+
         workflow = await get_workflow()
         await get_pool()
 

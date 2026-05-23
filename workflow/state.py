@@ -58,6 +58,7 @@ class VideoProcessingState(TypedDict):
     # Input
     videoUrl: str
     videoPath: Optional[str]
+    localVideoPath: Optional[str]   # temp path of a pre-downloaded YouTube video; reused across nodes
     sessionId: Optional[str]
     existingClips: Optional[List[ExistingClip]]  # Clips already generated for this video
 

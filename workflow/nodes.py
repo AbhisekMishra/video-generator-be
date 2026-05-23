@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 
 from workflow.state import VideoProcessingState, Clip
 from tasks.transcribe import transcribe_video
+from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
@@ -42,11 +43,19 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
     print(f"  Video Path: {state.get('videoPath')}")
     print(f"  Session ID: {state.get('sessionId')}")
 
+    video_url = state.get("videoUrl")
+    local_video_path = None
+
     try:
-        # Call the transcription task (this does the actual work)
+        # Download YouTube videos once here so render_node can reuse the same file
+        if video_url and is_youtube_url(video_url):
+            print(f"📥 Downloading YouTube video (once for full pipeline): {video_url}")
+            local_video_path = await download_youtube_video(video_url)
+            print(f"✅ YouTube video downloaded to: {local_video_path}")
+
         result = await transcribe_video(
-            video_url=state.get("videoUrl"),
-            video_path=state.get("videoPath")
+            video_url=video_url if not local_video_path else None,
+            video_path=local_video_path or state.get("videoPath")
         )
 
         print(f"✅ Transcription successful! Got {len(result.get('words', []))} words")
@@ -55,24 +64,27 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
         # LangGraph will automatically merge this dict into the existing state
         return {
             "transcript": {
-                "text": result["text"],              # Full transcript text
-                "words": result.get("words", []),     # Word-level timestamps
-                "language": result.get("language")    # Detected language
+                "text": result["text"],
+                "words": result.get("words", []),
+                "language": result.get("language")
             },
-            "currentStage": "identifyClips"  # Tell LangGraph to move to next stage
+            "localVideoPath": local_video_path,  # None for non-YouTube; render_node reuses this
+            "currentStage": "identifyClips"
         }
     except Exception as e:
-        # Python's exception handling (like try/catch in JavaScript)
         import traceback
         print(f"❌ ERROR: Transcription failed!")
         print(f"Error type: {type(e).__name__}")
         print(f"Error message: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
 
-        # Return error state (stays on current stage for retry)
+        # Clean up the downloaded file if transcription failed
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
+
         return {
             "errors": [str(e)],
-            "currentStage": "transcribe"  # Stay on this stage
+            "currentStage": "transcribe"
         }
 
 
@@ -409,8 +421,10 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
     clips = state.get("clips")
     captions = state.get("captions")
     session_id = state.get("sessionId")
-    video_url = state.get("videoUrl")
-    video_path = state.get("videoPath")
+    local_video_path = state.get("localVideoPath")  # pre-downloaded YouTube file from transcribe_node
+    # If transcribe_node already downloaded the video, use that local file; avoids re-downloading per clip
+    video_url = None if local_video_path else state.get("videoUrl")
+    video_path = local_video_path or state.get("videoPath")
 
     if not clips:
         print("ERROR: No clips available")
@@ -481,6 +495,11 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         print(f"🎉 All {len(rendered_videos)} clips rendered successfully!")
 
+        # Clean up the pre-downloaded YouTube video now that all clips are rendered
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
+            print(f"🗑️  Cleaned up downloaded video: {local_video_path}")
+
         # Persist clip URLs and metadata
         clip_paths = [rv["url"] for rv in rendered_videos]
         clips_metadata = [
@@ -507,6 +526,9 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
         print(f"ERROR: Rendering failed!")
         print(f"Error: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
+
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
 
         if session_id:
             update_session_status(session_id, "failed")

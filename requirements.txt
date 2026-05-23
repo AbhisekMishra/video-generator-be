@@ -15,6 +15,9 @@ supabase>=2.0.0
 # Whisper transcription via CTranslate2 — no PyTorch needed, ~70 MB RAM (vs ~350 MB for torch+openai-whisper)
 faster-whisper>=1.0.0
 
+# YouTube video downloading
+yt-dlp>=2024.1.0
+
 # Note: FFmpeg must be installed separately on the system
 # For Ubuntu/Debian: sudo apt-get install ffmpeg
 # For macOS: brew install ffmpeg
