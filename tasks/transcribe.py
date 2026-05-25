@@ -1,10 +1,54 @@
+import json
 import os
+import subprocess
 import tempfile
 import asyncio
 from typing import Optional, Dict
 from faster_whisper import WhisperModel
 
 from utils.file_utils import cleanup_file, is_youtube_url, download_youtube_video
+
+
+MIN_VIDEO_DURATION_SECONDS = 20
+
+
+async def _validate_video(video_path: str) -> None:
+    """
+    Run ffprobe to verify the video has an audio stream and meets the minimum duration.
+    Raises ValueError with a structured error code on failure.
+    """
+    cmd = [
+        "ffprobe",
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_streams",
+        "-show_format",
+        video_path,
+    ]
+
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False),
+    )
+
+    if result.returncode != 0:
+        # ffprobe couldn't read the file — let FFmpeg surface a proper error downstream
+        return
+
+    try:
+        info = json.loads(result.stdout.decode())
+    except json.JSONDecodeError:
+        return
+
+    duration = float(info.get("format", {}).get("duration", 0) or 0)
+    if 0 < duration < MIN_VIDEO_DURATION_SECONDS:
+        raise ValueError(f"video_too_short:{duration:.1f}")
+
+    streams = info.get("streams", [])
+    has_audio = any(s.get("codec_type") == "audio" for s in streams)
+    if streams and not has_audio:
+        raise ValueError("no_audio_track")
 
 
 _whisper_model = None
@@ -52,6 +96,10 @@ async def transcribe_video(
         else:
             raise ValueError("Either video_url or video_path must be provided")
 
+        # Validate duration and audio presence before spending time on extraction
+        if os.path.exists(input_path):
+            await _validate_video(input_path)
+
         # Extract audio from video using FFmpeg
         temp_audio_path = tempfile.mktemp(suffix=".wav")
         extract_audio_cmd = [
@@ -64,8 +112,6 @@ async def transcribe_video(
             "-y",
             temp_audio_path
         ]
-
-        import subprocess
 
         def run_ffmpeg():
             return subprocess.run(

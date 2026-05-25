@@ -125,6 +125,19 @@ def update_session_status(thread_id: str, status: str, completed: bool = False) 
         print(f"⚠️  Failed to update session status: {e}")
 
 
+def fail_session(session_id: str, error_message: str, error_stage: str) -> None:
+    """Mark session as failed with a structured error message and stage."""
+    try:
+        supabase.table("sessions").update({
+            "status": "failed",
+            "error_message": error_message,
+            "error_stage": error_stage,
+        }).eq("id", session_id).execute()
+        print(f"✅ Session {session_id}: failed at {error_stage} — {error_message}")
+    except Exception as e:
+        print(f"⚠️  Failed to mark session as failed: {e}")
+
+
 def update_session_clips_metadata(session_id: str, clips_metadata: list) -> None:
     """Store clip start/end/title/score metadata on the session row (queried by id)."""
     try:

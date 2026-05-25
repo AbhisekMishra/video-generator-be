@@ -17,7 +17,7 @@ from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
-from utils.supabase_client import update_session_model, update_session_status, complete_session
+from utils.supabase_client import update_session_model, update_session_status, complete_session, fail_session
 from tasks.render import render_video
 
 
@@ -58,12 +58,25 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
             video_path=local_video_path or state.get("videoPath")
         )
 
-        print(f"✅ Transcription successful! Got {len(result.get('words', []))} words")
+        words = result.get("words", [])
+        print(f"✅ Transcription successful! Got {len(words)} words")
+
+        # Fail fast if Whisper found no speech — downstream nodes can't work without words
+        if not words:
+            session_id = state.get("sessionId")
+            if local_video_path and os.path.exists(local_video_path):
+                os.remove(local_video_path)
+            if session_id:
+                fail_session(session_id, "no_speech_detected", "transcribe")
+            return {
+                "errors": ["no_speech_detected"],
+                "currentStage": "transcribe"
+            }
 
         updates: Dict[str, Any] = {
             "transcript": {
                 "text": result["text"],
-                "words": result.get("words", []),
+                "words": words,
                 "language": result.get("language")
             },
             "localVideoPath": local_video_path,  # None for non-YouTube; render_node reuses this
@@ -72,6 +85,20 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         return updates
 
+    except ValueError as e:
+        # Structured validation errors from ffprobe checks (video_too_short, no_audio_track)
+        error_code = str(e)
+        print(f"❌ Video validation failed: {error_code}")
+        if local_video_path and os.path.exists(local_video_path):
+            os.remove(local_video_path)
+        session_id = state.get("sessionId")
+        if session_id:
+            fail_session(session_id, error_code, "transcribe")
+        return {
+            "errors": [error_code],
+            "currentStage": "transcribe"
+        }
+
     except Exception as e:
         import traceback
         print(f"❌ ERROR: Transcription failed!")
@@ -79,7 +106,6 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
         print(f"Error message: {str(e)}")
         print(f"Traceback:\n{traceback.format_exc()}")
 
-        # Clean up the downloaded file if transcription failed
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
 
