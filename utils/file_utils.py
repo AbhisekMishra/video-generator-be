@@ -12,7 +12,7 @@ _YOUTUBE_PATTERN = re.compile(
     r'(youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)'
 )
 
-MAX_VIDEO_DURATION_SECONDS = 30 * 60  # 30 minutes
+MAX_VIDEO_DURATION_SECONDS = int(os.getenv("MAX_VIDEO_DURATION_SECONDS", str(30 * 60)))
 
 
 def is_youtube_url(url: str) -> bool:
