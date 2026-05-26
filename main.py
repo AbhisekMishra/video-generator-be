@@ -91,7 +91,10 @@ async def validate_youtube(request: ValidateYoutubeRequest):
     try:
         info = await get_youtube_info(request.url)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not fetch video info: {e}")
+        # Can't fetch metadata (e.g. bot-check, geo-block) — don't block the user.
+        # The download step will surface a real error if the video is truly inaccessible.
+        logger.warning(f"⚠️  Could not fetch YouTube metadata for validation (skipping): {e}")
+        return {"duration": None, "title": None, "skipped": True}
 
     duration = info["duration"]
     if duration > MAX_VIDEO_DURATION_SECONDS:

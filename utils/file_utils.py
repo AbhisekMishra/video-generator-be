@@ -47,15 +47,19 @@ async def download_youtube_video(url: str) -> str:
     """
     import yt_dlp
 
-    # Check duration before downloading to avoid wasting bandwidth on long videos
-    info = await get_youtube_info(url)
-    duration = info['duration']
-    if duration > MAX_VIDEO_DURATION_SECONDS:
-        minutes = int(duration // 60)
-        limit_minutes = MAX_VIDEO_DURATION_SECONDS // 60
-        raise ValueError(
-            f"video_too_long:{minutes}:{limit_minutes}"
-        )
+    # Check duration before downloading to avoid wasting bandwidth on long videos.
+    # If metadata fetch fails (e.g. bot-check), skip the pre-check and let the download proceed.
+    try:
+        info = await get_youtube_info(url)
+        duration = info['duration']
+        if duration > MAX_VIDEO_DURATION_SECONDS:
+            minutes = int(duration // 60)
+            limit_minutes = MAX_VIDEO_DURATION_SECONDS // 60
+            raise ValueError(f"video_too_long:{minutes}:{limit_minutes}")
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning(f"⚠️  Could not fetch YouTube metadata before download (skipping duration check): {e}")
 
     temp_dir = tempfile.mkdtemp()
     output_template = os.path.join(temp_dir, 'video.%(ext)s')
