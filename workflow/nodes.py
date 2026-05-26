@@ -21,7 +21,7 @@ from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
-from utils.supabase_client import update_session_model, update_session_status, complete_session, fail_session
+from utils.supabase_client import update_session_model, complete_session, fail_session
 from tasks.render import render_video
 
 
@@ -112,6 +112,10 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
+
+        session_id = state.get("sessionId")
+        if session_id:
+            fail_session(session_id, str(e), "transcribe")
 
         return {
             "errors": [str(e)],
@@ -569,7 +573,7 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
             os.remove(local_video_path)
 
         if session_id:
-            update_session_status(session_id, "failed")
+            fail_session(session_id, str(e), "render")
 
         return {
             "errors": [str(e)],

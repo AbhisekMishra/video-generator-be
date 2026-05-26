@@ -138,7 +138,8 @@ def fail_session(session_id: str, error_message: str, error_stage: str) -> None:
         }).eq("id", session_id).execute()
         logger.info(f"✅ Session {session_id}: failed at {error_stage} — {error_message}")
     except Exception as e:
-        logger.warning(f"⚠️  Failed to mark session as failed: {e}")
+        logger.error(f"❌ Failed to mark session as failed: {e}")
+        raise
 
 
 def update_session_clips_metadata(session_id: str, clips_metadata: list) -> None:
@@ -164,7 +165,8 @@ def complete_session(session_id: str, clip_paths: list, clips_metadata: list) ->
         }).eq("id", session_id).execute()
         logger.info(f"✅ Session {session_id}: completed with {len(clip_paths)} clips")
     except Exception as e:
-        logger.warning(f"⚠️  Failed to complete session: {e}")
+        logger.error(f"❌ Failed to complete session: {e}")
+        raise
 
 
 def delete_from_supabase(storage_path: str) -> bool:

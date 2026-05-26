@@ -255,7 +255,7 @@ async def _process_job(job: Dict[str, Any]) -> None:
         )
 
         config = {"configurable": {"thread_id": session_id}}
-        await workflow.ainvoke(
+        result = await workflow.ainvoke(
             {
                 "videoUrl": payload["video_url"],
                 "sessionId": session_id,
@@ -264,13 +264,52 @@ async def _process_job(job: Dict[str, Any]) -> None:
             config,
         )
 
-        await _mark_completed(job_id)
-        logger.info(f"✅ Job {job_id} completed  session={session_id}")
+        # Nodes return errors in state rather than raising — treat as job failure.
+        # The graph has no conditional edges so ainvoke() always returns without raising.
+        if result.get("errors"):
+            err = "; ".join(str(e) for e in result["errors"])
+            logger.error(f"❌ Job {job_id} workflow errors  session={session_id}: {err}")
+            await _mark_failed(job_id, err)
+            # Safety net: ensure session is failed even if the node's fail_session() call failed
+            try:
+                stage = result.get("currentStage") or "unknown"
+                await asyncio.to_thread(
+                    lambda: supabase.table("sessions")
+                    .update({
+                        "status": "failed",
+                        "error_message": err[:2000],
+                        "error_stage": stage,
+                    })
+                    .eq("id", session_id)
+                    .execute()
+                )
+            except Exception as sess_err:
+                logger.error(f"❌ Safety-net session update failed  session={session_id}: {sess_err}")
+        else:
+            await _mark_completed(job_id)
+            logger.info(f"✅ Job {job_id} completed  session={session_id}")
 
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         logger.exception(f"❌ Job {job_id} FAILED  session={session_id}")
-        await _mark_failed(job_id, err)
+        try:
+            await _mark_failed(job_id, err)
+        except Exception as mark_err:
+            logger.error(f"❌ Failed to mark job {job_id} as failed in queue: {mark_err}")
+        # Safety net: update session status directly in case nodes never did
+        try:
+            await asyncio.to_thread(
+                lambda: supabase.table("sessions")
+                .update({
+                    "status": "failed",
+                    "error_message": err[:2000],
+                    "error_stage": "processing",
+                })
+                .eq("id", session_id)
+                .execute()
+            )
+        except Exception as sess_err:
+            logger.error(f"❌ Safety-net session update failed  session={session_id}: {sess_err}")
 
 
 async def _worker_loop() -> None:
@@ -292,7 +331,13 @@ async def _worker_loop() -> None:
                 job = await _claim_next_job()
                 if job:
                     logger.info(f"📥 Claimed job {job['id']}  session={job['session_id']}  user={job.get('user_id', 'unknown')}")
-                    asyncio.create_task(_process_job(job))
+                    task = asyncio.create_task(_process_job(job))
+
+                    def _on_done(t: asyncio.Task, _sid: str = job["session_id"]) -> None:
+                        if not t.cancelled() and t.exception():
+                            logger.error(f"❌ Unhandled exception in job task  session={_sid}: {t.exception()}")
+
+                    task.add_done_callback(_on_done)
 
         except Exception as e:
             logger.warning(f"⚠️  Worker loop error: {e}")
