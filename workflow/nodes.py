@@ -167,6 +167,39 @@ async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
         first_word_at = words[0]["start"] if words else 0.0
         last_word_at = words[-1]["end"] if words else 0.0
 
+        # Build transcript text for the prompt.
+        # Long transcripts exceed model token limits (8 000 tokens max), so for videos
+        # whose transcript exceeds the budget we sample evenly-spaced time segments with
+        # [MM:SS] markers so the LLM still sees content from the full video and can
+        # return accurate timestamps.
+        MAX_TRANSCRIPT_CHARS = 18_000  # leaves ~2 000 tokens headroom for the rest of the prompt
+        raw_transcript_text = transcript.get("text", "")
+        if len(raw_transcript_text) <= MAX_TRANSCRIPT_CHARS:
+            transcript_text_for_prompt = raw_transcript_text
+        else:
+            num_segments = 6
+            total_duration = last_word_at - first_word_at
+            segment_duration = total_duration / num_segments
+            chars_per_segment = MAX_TRANSCRIPT_CHARS // num_segments
+            segments = []
+            for i in range(num_segments):
+                seg_start = first_word_at + i * segment_duration
+                seg_end = seg_start + segment_duration
+                seg_words = [w["word"] for w in words if seg_start <= w["start"] < seg_end]
+                seg_text = " ".join(seg_words)[:chars_per_segment]
+                if seg_text.strip():
+                    mm, ss = divmod(int(seg_start), 60)
+                    segments.append(f"[{mm:02d}:{ss:02d}] {seg_text}")
+            total_minutes = int(last_word_at / 60)
+            transcript_text_for_prompt = (
+                f"[{total_minutes}-minute video — transcript sampled across all sections]\n\n"
+                + "\n\n".join(segments)
+            )
+            logger.info(
+                f"✂️  Transcript truncated for LLM: {len(raw_transcript_text)} → "
+                f"{len(transcript_text_for_prompt)} chars across {len(segments)} segments"
+            )
+
         # Build existing clips exclusion section for the prompt
         existing_clips = state.get("existingClips") or []
         existing_clips_section = ""
@@ -186,7 +219,7 @@ Each new clip must not overlap any existing clip by more than 5 seconds.
         prompt = f"""You are an expert video editor analyzing a transcript to identify the best 3 short-form clips for social media.
 
 Transcript:
-{transcript['text']}
+{transcript_text_for_prompt}
 {existing_clips_section}
 CRITICAL RULES:
 - Speech in this video begins at {first_word_at:.1f}s. Do NOT start any clip before {first_word_at:.1f}s.
