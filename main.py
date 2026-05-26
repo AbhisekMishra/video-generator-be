@@ -32,6 +32,7 @@ from tasks.transcribe import transcribe_video
 from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
 from utils.caption_generator import create_ass_file_for_clip
+from utils.file_utils import get_youtube_info, is_youtube_url, MAX_VIDEO_DURATION_SECONDS
 from workflow.graph import get_workflow, cleanup_connections
 from utils.quota import verify_session_owner
 from utils.queue_manager import enqueue_job, get_queue_status, start_worker, stop_worker
@@ -72,6 +73,40 @@ app.add_middleware(
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+class ValidateYoutubeRequest(BaseModel):
+    url: str
+
+
+@app.post("/validate-youtube")
+async def validate_youtube(request: ValidateYoutubeRequest):
+    """
+    Check a YouTube URL's duration before creating a session.
+    Returns 400 if the video exceeds MAX_VIDEO_DURATION_SECONDS.
+    """
+    if not is_youtube_url(request.url):
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL.")
+
+    try:
+        info = await get_youtube_info(request.url)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Could not fetch video info: {e}")
+
+    duration = info["duration"]
+    if duration > MAX_VIDEO_DURATION_SECONDS:
+        minutes = int(duration // 60)
+        limit_minutes = MAX_VIDEO_DURATION_SECONDS // 60
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"This video is {minutes} minutes long. "
+                f"We support videos up to {limit_minutes} minutes. "
+                f"Please try a shorter clip or a specific section of the video."
+            ),
+        )
+
+    return {"duration": duration, "title": info["title"]}
 
 
 class TranscribeRequest(BaseModel):

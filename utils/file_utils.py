@@ -12,17 +12,50 @@ _YOUTUBE_PATTERN = re.compile(
     r'(youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)'
 )
 
+MAX_VIDEO_DURATION_SECONDS = 30 * 60  # 30 minutes
+
 
 def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_PATTERN.search(url))
+
+
+async def get_youtube_info(url: str) -> dict:
+    """
+    Fetch YouTube video metadata without downloading.
+    Returns dict with 'duration' (seconds) and 'title'.
+    """
+    import yt_dlp
+
+    ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
+
+    def _extract():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    info = await asyncio.to_thread(_extract)
+    return {
+        'duration': info.get('duration') or 0,
+        'title': info.get('title') or 'Unknown',
+    }
 
 
 async def download_youtube_video(url: str) -> str:
     """
     Download a YouTube video using yt-dlp. Returns path to the downloaded file.
     Caller is responsible for cleanup.
+    Raises ValueError if the video exceeds MAX_VIDEO_DURATION_SECONDS.
     """
     import yt_dlp
+
+    # Check duration before downloading to avoid wasting bandwidth on long videos
+    info = await get_youtube_info(url)
+    duration = info['duration']
+    if duration > MAX_VIDEO_DURATION_SECONDS:
+        minutes = int(duration // 60)
+        limit_minutes = MAX_VIDEO_DURATION_SECONDS // 60
+        raise ValueError(
+            f"video_too_long:{minutes}:{limit_minutes}"
+        )
 
     temp_dir = tempfile.mkdtemp()
     output_template = os.path.join(temp_dir, 'video.%(ext)s')

@@ -241,14 +241,12 @@ async def _process_job(job: Dict[str, Any]) -> None:
         await get_pool()
 
         # Transition session from 'queued' → 'processing' now that work begins
-        # video_url stored here so it's available on failure for debugging
         await asyncio.to_thread(
             lambda: supabase.table("sessions")
             .update({
                 "status": "processing",
                 "current_stage": "transcribe",
                 "progress": 10,
-                "video_url": payload.get("video_url"),
             })
             .eq("id", session_id)
             .execute()

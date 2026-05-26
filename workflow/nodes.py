@@ -94,8 +94,14 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
         return updates
 
     except ValueError as e:
-        # Structured validation errors from ffprobe checks (video_too_short, no_audio_track)
+        # Structured validation errors from ffprobe checks or duration limits
         error_code = str(e)
+        # Translate video_too_long:<minutes>:<limit> into a human-readable message
+        if error_code.startswith("video_too_long:"):
+            parts = error_code.split(":")
+            minutes = parts[1] if len(parts) > 1 else "?"
+            limit = parts[2] if len(parts) > 2 else "30"
+            error_code = f"Video is too long ({minutes} min). Maximum supported length is {limit} minutes. Please use a shorter clip."
         logger.error(f"❌ Video validation failed: {error_code}  video_url={video_url}")
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
