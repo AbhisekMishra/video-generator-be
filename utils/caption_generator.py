@@ -10,6 +10,9 @@ import os
 import re
 import tempfile
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
+
 
 def format_ass_time(seconds: float) -> str:
     """
@@ -41,8 +44,7 @@ def filter_words_for_clip(words: List[Dict], clip_start: float, clip_end: float)
     Returns:
         List of words with timestamps adjusted relative to clip start (0.0)
     """
-    print(f"🔍 filter_words_for_clip called with clip_start={clip_start}, clip_end={clip_end}")
-    print(f"🔍 Total words in transcript: {len(words)}")
+    logger.info(f"🔍 filter_words_for_clip  clip_start={clip_start}  clip_end={clip_end}  total_words={len(words)}")
 
     filtered_words = []
 
@@ -60,10 +62,10 @@ def filter_words_for_clip(words: List[Dict], clip_start: float, clip_end: float)
             }
             filtered_words.append(adjusted_word)
 
-    print(f"🔍 Filtered words: {len(filtered_words)}")
-    if len(filtered_words) > 0:
-        print(f"🔍 First word: '{filtered_words[0]['word']}' at {filtered_words[0]['start']:.2f}s (original: {words[0]['start']:.2f}s)")
-        print(f"🔍 Last word: '{filtered_words[-1]['word']}' at {filtered_words[-1]['end']:.2f}s")
+    if filtered_words:
+        logger.info(f"🔍 Filtered words: {len(filtered_words)}  first='{filtered_words[0]['word']}' at {filtered_words[0]['start']:.2f}s  last='{filtered_words[-1]['word']}' at {filtered_words[-1]['end']:.2f}s")
+    else:
+        logger.warning("🔍 Filtered words: 0 — no words found in clip timerange")
 
     return filtered_words
 
@@ -133,7 +135,7 @@ def resolve_bullet_timestamps(
     ]
 
     if not usable_words:
-        print("⚠️  No usable words for bullet points after filtering")
+        logger.warning("⚠️  No usable words for bullet points after filtering")
         return []
 
     # Normalised LLM words → original text, keyed for fast lookup
@@ -187,10 +189,10 @@ def resolve_bullet_timestamps(
             matched_text = re.sub(r'[^\w]', '', matched_word['word']).strip()
 
         if matched_text and matched_word:
-            print(f"  Bucket {bucket_idx + 1} ({b_start:.1f}s–{b_end:.1f}s): '{matched_text}' at {matched_word['start']:.2f}s")
+            logger.info(f"  Bucket {bucket_idx + 1} ({b_start:.1f}s–{b_end:.1f}s): '{matched_text}' at {matched_word['start']:.2f}s")
             resolved.append({"text": matched_text, "appear_at": matched_word['start']})
 
-    print(f"📋 Final bullets: {[(p['text'], round(p['appear_at'], 2)) for p in resolved]}")
+    logger.info(f"📋 Final bullets: {[(p['text'], round(p['appear_at'], 2)) for p in resolved]}")
     return resolved
 
 
@@ -399,9 +401,6 @@ def create_ass_file_for_clip(
     # Debug: show styles + all overlay lines (header/bullets) + first caption line
     lines = ass_content.splitlines()
     overlay_lines = [l for l in lines if "Header" in l or "BulletPoint" in l]
-    print(f"📝 ASS overlay lines ({len(overlay_lines)}):")
-    for l in overlay_lines:
-        print(f"   {l}")
-    print(f"📝 ASS file saved to: {temp_path}")
+    logger.info(f"📝 ASS file saved to: {temp_path}  overlay_lines={len(overlay_lines)}")
 
     return temp_path

@@ -2,6 +2,8 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from workflow.state import VideoProcessingState
+from utils.logger import get_logger
+logger = get_logger(__name__)
 from workflow.nodes import (
     transcribe_node,
     identify_clips_node,
@@ -38,9 +40,9 @@ async def create_workflow() -> StateGraph:
 async def get_workflow() -> StateGraph:
     global _graph_instance
     if _graph_instance is None:
-        print("Initializing video processing workflow...")
+        logger.info("Initializing video processing workflow...")
         _graph_instance = await create_workflow()
-        print("Workflow initialized successfully")
+        logger.info("Workflow initialized successfully")
     return _graph_instance
 
 

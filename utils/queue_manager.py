@@ -14,6 +14,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 
 from utils.supabase_client import supabase
+from utils.logger import get_logger, set_request_context
+
+logger = get_logger(__name__)
 
 MAX_CONCURRENT_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "2"))
 WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "3"))
@@ -166,7 +169,7 @@ async def _recover_stale_jobs() -> None:
         .execute()
     )
     if result.data:
-        print(f"♻️  Recovered {len(result.data)} stale job(s)")
+        logger.info(f"♻️  Recovered {len(result.data)} stale job(s)")
 
 
 async def _claim_next_job() -> Optional[Dict[str, Any]]:
@@ -229,16 +232,24 @@ async def _process_job(job: Dict[str, Any]) -> None:
     session_id = job["session_id"]
     payload = job["payload"]
 
-    print(f"\n⚙️  Processing job {job_id}  session={session_id}")
+    user_id = job.get("user_id", "anonymous")
+    set_request_context(user_id, session_id)
+    logger.info(f"⚙️  Processing job {job_id}  session={session_id}  user={user_id}")
 
     try:
         workflow = await get_workflow()
         await get_pool()
 
         # Transition session from 'queued' → 'processing' now that work begins
+        # video_url stored here so it's available on failure for debugging
         await asyncio.to_thread(
             lambda: supabase.table("sessions")
-            .update({"status": "processing", "current_stage": "transcribe", "progress": 10})
+            .update({
+                "status": "processing",
+                "current_stage": "transcribe",
+                "progress": 10,
+                "video_url": payload.get("video_url"),
+            })
             .eq("id", session_id)
             .execute()
         )
@@ -254,11 +265,11 @@ async def _process_job(job: Dict[str, Any]) -> None:
         )
 
         await _mark_completed(job_id)
-        print(f"✅ Job {job_id} completed  session={session_id}")
+        logger.info(f"✅ Job {job_id} completed  session={session_id}")
 
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
-        print(f"❌ Job {job_id} FAILED  session={session_id}\n{traceback.format_exc()}")
+        logger.exception(f"❌ Job {job_id} FAILED  session={session_id}")
         await _mark_failed(job_id, err)
 
 
@@ -267,11 +278,9 @@ async def _worker_loop() -> None:
     Background loop: every WORKER_POLL_INTERVAL seconds, recover stale jobs
     and dispatch pending jobs up to MAX_CONCURRENT_JOBS.
     """
-    print(
-        f"🔄 Queue worker started  "
-        f"max_concurrent={MAX_CONCURRENT_JOBS}  "
-        f"poll={WORKER_POLL_INTERVAL}s  "
-        f"stale_timeout={JOB_STALE_TIMEOUT_MINUTES}min"
+    logger.info(
+        f"🔄 Queue worker started  max_concurrent={MAX_CONCURRENT_JOBS}  "
+        f"poll={WORKER_POLL_INTERVAL}s  stale_timeout={JOB_STALE_TIMEOUT_MINUTES}min"
     )
 
     while True:
@@ -282,10 +291,10 @@ async def _worker_loop() -> None:
             if active < MAX_CONCURRENT_JOBS:
                 job = await _claim_next_job()
                 if job:
-                    print(f"📥 Claimed job {job['id']}  session={job['session_id']}")
+                    logger.info(f"📥 Claimed job {job['id']}  session={job['session_id']}  user={job.get('user_id', 'unknown')}")
                     asyncio.create_task(_process_job(job))
 
         except Exception as e:
-            print(f"⚠️  Worker loop error: {e}")
+            logger.warning(f"⚠️  Worker loop error: {e}")
 
         await asyncio.sleep(WORKER_POLL_INTERVAL)

@@ -7,6 +7,8 @@ from typing import Optional, Dict
 from faster_whisper import WhisperModel
 
 from utils.file_utils import cleanup_file, is_youtube_url, download_youtube_video
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 
 MIN_VIDEO_DURATION_SECONDS = 20
@@ -59,7 +61,7 @@ def get_whisper_model():
     if _whisper_model is None:
         # int8 quantization: ~70 MB RAM vs ~350 MB for torch+openai-whisper base
         _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
-        print("Loaded faster-whisper base model (int8, cpu)")
+        logger.info("Loaded faster-whisper base model (int8, cpu)")
     return _whisper_model
 
 
@@ -83,10 +85,10 @@ async def transcribe_video(
     try:
         if video_url:
             if is_youtube_url(video_url):
-                print(f"📥 Downloading YouTube video: {video_url}")
+                logger.info(f"📥 Downloading YouTube video: {video_url}")
                 downloaded_video_path = await download_youtube_video(video_url)
                 input_path = downloaded_video_path
-                print(f"✅ YouTube video downloaded to: {input_path}")
+                logger.info(f"✅ YouTube video downloaded to: {input_path}")
             else:
                 input_path = video_url
         elif video_path:
@@ -160,7 +162,7 @@ async def transcribe_video(
 
         result = await loop.run_in_executor(None, run_transcribe)
 
-        print(f"Transcription complete: {len(result['words'])} words, language={result['language']}")
+        logger.info(f"Transcription complete: {len(result['words'])} words  language={result['language']}")
         return result
 
     finally:

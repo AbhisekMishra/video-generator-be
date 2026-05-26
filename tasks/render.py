@@ -5,6 +5,8 @@ from typing import Optional, Dict
 import subprocess
 
 from utils.file_utils import cleanup_file, is_youtube_url, download_youtube_video
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 # ── Gap proportions (fraction of source video height) ────────────────────────
 # Applied at render time based on actual source dimensions.
@@ -122,11 +124,11 @@ def _pillow_am_logo(png_path: str) -> bool:
         draw.ellipse([440, 70, 456, 86], fill=(0,  229, 255, 255))    # M right — cyan
 
         base.save(png_path, "PNG")
-        print("[OK] Logo PNG generated via Pillow (AM vector render)")
+        logger.info("[OK] Logo PNG generated via Pillow (AM vector render)")
         return True
 
     except Exception as exc:
-        print(f"[WARN] Pillow AM logo render failed: {exc}")
+        logger.warning(f"[WARN] Pillow AM logo render failed: {exc}")
         return False
 
 
@@ -146,11 +148,11 @@ def _logo_as_png() -> Optional[str]:
     """
     # 0. Pre-rendered PNG (user-supplied or previously cached)
     if os.path.exists(_LOGO_PNG):
-        print("✅ Using pre-rendered logo.png")
+        logger.info("✅ Using pre-rendered logo.png")
         return _LOGO_PNG
 
     if not os.path.exists(_LOGO_SVG):
-        print(f"⚠️  No logo found in {_ASSETS_DIR} — skipping logo overlay")
+        logger.warning(f"⚠️  No logo found in {_ASSETS_DIR} — skipping logo overlay")
         return None
 
     png_path = tempfile.mktemp(suffix='.png')
@@ -159,7 +161,7 @@ def _logo_as_png() -> Optional[str]:
     try:
         import cairosvg
         cairosvg.svg2png(url=_LOGO_SVG, write_to=png_path, output_width=520, output_height=340)
-        print("✅ Logo PNG via cairosvg")
+        logger.info("✅ Logo PNG via cairosvg")
         return png_path
     except ImportError:
         pass
@@ -173,7 +175,7 @@ def _logo_as_png() -> Optional[str]:
         drawing = svg2rlg(_LOGO_SVG)
         if drawing:
             renderPM.drawToFile(drawing, png_path, fmt="PNG")
-            print("✅ Logo PNG via svglib")
+            logger.info("✅ Logo PNG via svglib")
             return png_path
     except ImportError:
         pass
@@ -187,7 +189,7 @@ def _logo_as_png() -> Optional[str]:
             capture_output=True, check=False, timeout=15
         )
         if r.returncode == 0 and os.path.exists(png_path):
-            print("✅ Logo PNG via Inkscape")
+            logger.info("✅ Logo PNG via Inkscape")
             return png_path
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -199,7 +201,7 @@ def _logo_as_png() -> Optional[str]:
             capture_output=True, check=False, timeout=15
         )
         if r.returncode == 0 and os.path.exists(png_path):
-            print("✅ Logo PNG via ImageMagick")
+            logger.info("✅ Logo PNG via ImageMagick")
             return png_path
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
@@ -208,8 +210,7 @@ def _logo_as_png() -> Optional[str]:
     if _pillow_am_logo(png_path):
         return png_path
 
-    print("⚠️  All logo backends exhausted — skipping logo overlay")
-    print("     Quickest fix: place a logo.png in utils/assets/")
+    logger.warning("⚠️  All logo backends exhausted — skipping logo overlay. Quickest fix: place a logo.png in utils/assets/")
     return None
 
 
@@ -284,10 +285,10 @@ async def render_video(
         # ── 1. Resolve input ──────────────────────────────────────────────
         if video_url:
             if is_youtube_url(video_url):
-                print(f"📥 Downloading YouTube video: {video_url}")
+                logger.info(f"📥 Downloading YouTube video: {video_url}")
                 downloaded_video_path = await download_youtube_video(video_url)
                 input_path = downloaded_video_path
-                print(f"✅ YouTube video downloaded to: {input_path}")
+                logger.info(f"✅ YouTube video downloaded to: {input_path}")
             else:
                 input_path = video_url
         elif video_path:
@@ -302,13 +303,13 @@ async def render_video(
 
         # ── 2. Detect source dimensions ───────────────────────────────────
         orig_w, orig_h = await get_video_dimensions(input_path)
-        print(f"📐 Source dimensions: {orig_w}×{orig_h}")
+        logger.info(f"📐 Source dimensions: {orig_w}×{orig_h}")
 
         # Compute gap sizes from source height — keeps original video untouched
         top_gap    = max(40, int(orig_h * TOP_GAP_RATIO))
         bottom_gap = max(25, int(orig_h * BOTTOM_GAP_RATIO))
         out_h      = orig_h + top_gap + bottom_gap   # canvas = original + gaps
-        print(f"📐 Layout: top_gap={top_gap}px  bottom_gap={bottom_gap}px  output={orig_w}×{out_h}")
+        logger.info(f"📐 Layout: top_gap={top_gap}px  bottom_gap={bottom_gap}px  output={orig_w}×{out_h}")
 
         # ── 3. Build FFmpeg filter chain ──────────────────────────────────
         #
@@ -339,17 +340,17 @@ async def render_video(
 
         # Step C: burn ASS subtitles (title + bullets + word captions)
         if subtitle_path and os.path.exists(subtitle_path):
-            print(f"🔍 Subtitle path: {subtitle_path}")
+            logger.info(f"🔍 Subtitle path: {subtitle_path}")
             # Windows: forward slashes + escape colon in drive letter
             escaped = subtitle_path.replace('\\', '/').replace(':', '\\\\:')
-            print(f"🔍 Escaped subtitle path: {escaped}")
+            logger.info(f"🔍 Escaped subtitle path: {escaped}")
             fc_parts.append(f"{current_label}subtitles={escaped}[out]")
             output_label = "[out]"
         else:
             output_label = current_label
 
         filter_complex = ";".join(fc_parts)
-        print(f"🔧 filter_complex:\n{filter_complex}")
+        logger.info(f"🔧 filter_complex:\n{filter_complex}")
 
         # ── 5. Assemble FFmpeg command ────────────────────────────────────
         # IMPORTANT: -t must come AFTER all -i flags.
@@ -374,7 +375,7 @@ async def render_video(
             output_path
         ]
 
-        print(f"🔧 FFmpeg command: {' '.join(ffmpeg_cmd)}")
+        logger.info(f"🔧 FFmpeg command: {' '.join(ffmpeg_cmd)}")
 
         # ── 6. Run FFmpeg ─────────────────────────────────────────────────
         def run_ffmpeg():
@@ -386,13 +387,12 @@ async def render_video(
         stderr_output = result.stderr.decode()
         if subtitle_path and stderr_output:
             if '[Parsed_subtitles_' in stderr_output:
-                print("✅ Subtitle filter loaded by FFmpeg")
+                logger.info("✅ Subtitle filter loaded by FFmpeg")
             else:
-                print("❌ WARNING: Subtitle filter was NOT loaded by FFmpeg!")
-                print(stderr_output[:3000])
+                logger.warning(f"❌ Subtitle filter was NOT loaded by FFmpeg!\n{stderr_output[:3000]}")
 
         if result.returncode != 0:
-            print(f"❌ FFmpeg FULL error:\n{stderr_output}")
+            logger.error(f"❌ FFmpeg FULL error:\n{stderr_output}")
             raise RuntimeError(f"FFmpeg failed: {stderr_output[-1000:]}")
 
         if not os.path.exists(output_path):

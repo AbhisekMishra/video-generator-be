@@ -9,6 +9,8 @@ Windows reset lazily on each read.
 import asyncio
 from datetime import datetime, timezone
 from utils.model_registry import MODEL_REGISTRY, TIER_ORDER
+from utils.logger import get_logger
+logger = get_logger(__name__)
 
 
 class ModelQuotaExhaustedError(Exception):
@@ -46,7 +48,7 @@ def _init_usage():
 async def ensure_tables(pool=None) -> None:
     """No-op: in-memory store needs no setup."""
     _init_usage()
-    print("✅ model_usage ready (in-memory)")
+    logger.info("✅ model_usage ready (in-memory)")
 
 
 async def select_model(pool=None, excluded: set[str] | None = None) -> str:
@@ -82,12 +84,10 @@ async def select_model(pool=None, excluded: set[str] | None = None) -> str:
                 if data["rpm_used"] < data["rpm_limit"] and data["rpd_used"] < data["rpd_limit"]:
                     data["rpm_used"] += 1
                     data["rpd_used"] += 1
-                    print(f"🤖 Selected model: {name} (tier={tier}, "
-                          f"rpm={data['rpm_used']}/{data['rpm_limit']}, "
-                          f"rpd={data['rpd_used']}/{data['rpd_limit']})")
+                    logger.info(f"🤖 Selected model: {name} (tier={tier}, rpm={data['rpm_used']}/{data['rpm_limit']}, rpd={data['rpd_used']}/{data['rpd_limit']})")
                     return name
 
-            print(f"⚠️ {tier.capitalize()} tier exhausted, trying next tier...")
+            logger.warning(f"⚠️ {tier.capitalize()} tier exhausted, trying next tier...")
 
     raise ModelQuotaExhaustedError(
         "All model quotas exhausted across low, high, and special tiers. "
@@ -101,4 +101,4 @@ async def exhaust_model(pool=None, model_name: str = "") -> None:
         _init_usage()
         if model_name in _usage:
             _usage[model_name]["rpd_used"] = _usage[model_name]["rpd_limit"]
-    print(f"🚫 Model '{model_name}' marked as exhausted (will not be selected again today)")
+    logger.warning(f"🚫 Model '{model_name}' marked as exhausted (will not be selected again today)")

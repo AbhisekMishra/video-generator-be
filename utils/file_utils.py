@@ -5,6 +5,9 @@ import asyncio
 import aiohttp
 from typing import Optional
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
+
 _YOUTUBE_PATTERN = re.compile(
     r'(youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)'
 )
@@ -86,9 +89,9 @@ async def cleanup_file(file_path: str) -> None:
     if file_path and os.path.exists(file_path):
         try:
             await asyncio.to_thread(os.remove, file_path)
-            print(f"Cleaned up file: {file_path}")
+            logger.info(f"Cleaned up file: {file_path}")
         except Exception as e:
-            print(f"Warning: Failed to cleanup file {file_path}: {e}")
+            logger.warning(f"Warning: Failed to cleanup file {file_path}: {e}")
 
 
 async def cleanup_files(*file_paths: str) -> None:

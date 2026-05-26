@@ -4,6 +4,9 @@ import tempfile
 import os
 from typing import Optional
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
+
 
 _YOUTUBE_PATTERN = re.compile(
     r'(youtube\.com/watch\?.*v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/live/)'
@@ -64,13 +67,13 @@ async def download_youtube_video(url: str) -> str:
 
     if cookies_file:
         cmd += ["--cookies", cookies_file]
-        print("🍪 Using YouTube cookies for authentication")
+        logger.info("🍪 Using YouTube cookies for authentication")
     else:
-        print("⚠️  No YOUTUBE_COOKIES env var set — download may fail on server IPs")
+        logger.warning("⚠️  No YOUTUBE_COOKIES env var set — download may fail on server IPs")
 
     cmd += ["-o", output_path, url]
 
-    print(f"⬇️  Downloading YouTube video: {url}")
+    logger.info(f"⬇️  Downloading YouTube video: {url}")
 
     loop = asyncio.get_event_loop()
     try:
@@ -91,5 +94,5 @@ async def download_youtube_video(url: str) -> str:
         raise RuntimeError("yt-dlp completed but output file not found")
 
     size_mb = os.path.getsize(output_path) / 1024 / 1024
-    print(f"✅ YouTube download complete: {output_path} ({size_mb:.1f} MB)")
+    logger.info(f"✅ YouTube download complete: {output_path} ({size_mb:.1f} MB)")
     return output_path

@@ -7,6 +7,9 @@ from typing import Optional
 from supabase import create_client, Client
 import aiohttp
 
+from utils.logger import get_logger
+logger = get_logger(__name__)
+
 # Initialize Supabase client
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
@@ -39,7 +42,7 @@ async def download_from_supabase(file_path: str) -> str:
         response = supabase.storage.from_(STORAGE_BUCKET).get_public_url(file_path)
         public_url = response
 
-        print(f"📥 Downloading from Supabase: {file_path}")
+        logger.info(f"📥 Downloading from Supabase: {file_path}")
 
         # Download the file using aiohttp
         async with aiohttp.ClientSession() as session:
@@ -58,11 +61,11 @@ async def download_from_supabase(file_path: str) -> str:
                 finally:
                     temp_file.close()
 
-                print(f"✅ Downloaded to temporary file: {temp_file.name}")
+                logger.info(f"✅ Downloaded to temporary file: {temp_file.name}")
                 return temp_file.name
 
     except Exception as e:
-        print(f"❌ Error downloading from Supabase: {e}")
+        logger.error(f"❌ Error downloading from Supabase: {e}  path={file_path}")
         raise Exception(f"Failed to download from Supabase: {str(e)}")
 
 
@@ -81,7 +84,7 @@ def upload_to_supabase(local_file_path: str, storage_path: str) -> str:
         Exception: If upload fails
     """
     try:
-        print(f"📤 Uploading to Supabase: {storage_path}")
+        logger.info(f"📤 Uploading to Supabase: {storage_path}")
 
         # Pass the file object directly — avoids loading entire file into RAM
         with open(local_file_path, 'rb') as f:
@@ -95,11 +98,11 @@ def upload_to_supabase(local_file_path: str, storage_path: str) -> str:
         public_url_response = supabase.storage.from_(STORAGE_BUCKET).get_public_url(storage_path)
         public_url = public_url_response
 
-        print(f"✅ Uploaded successfully: {public_url}")
+        logger.info(f"✅ Uploaded successfully: {public_url}")
         return public_url
 
     except Exception as e:
-        print(f"❌ Error uploading to Supabase: {e}")
+        logger.error(f"❌ Error uploading to Supabase: {e}  path={storage_path}")
         raise Exception(f"Failed to upload to Supabase: {str(e)}")
 
 
@@ -107,9 +110,9 @@ def update_session_model(thread_id: str, model_name: str) -> None:
     """Update model_used on the sessions row identified by thread_id."""
     try:
         supabase.table("sessions").update({"model_used": model_name}).eq("thread_id", thread_id).execute()
-        print(f"✅ Session {thread_id}: model_used = {model_name}")
+        logger.info(f"✅ Session {thread_id}: model_used={model_name}")
     except Exception as e:
-        print(f"⚠️  Failed to update session model: {e}")
+        logger.warning(f"⚠️  Failed to update session model: {e}")
 
 
 def update_session_status(thread_id: str, status: str, completed: bool = False) -> None:
@@ -120,9 +123,9 @@ def update_session_status(thread_id: str, status: str, completed: bool = False) 
             from datetime import datetime, timezone
             data["completed_at"] = datetime.now(timezone.utc).isoformat()
         supabase.table("sessions").update(data).eq("thread_id", thread_id).execute()
-        print(f"✅ Session {thread_id}: status = {status}")
+        logger.info(f"✅ Session {thread_id}: status={status}")
     except Exception as e:
-        print(f"⚠️  Failed to update session status: {e}")
+        logger.warning(f"⚠️  Failed to update session status: {e}")
 
 
 def fail_session(session_id: str, error_message: str, error_stage: str) -> None:
@@ -133,18 +136,18 @@ def fail_session(session_id: str, error_message: str, error_stage: str) -> None:
             "error_message": error_message,
             "error_stage": error_stage,
         }).eq("id", session_id).execute()
-        print(f"✅ Session {session_id}: failed at {error_stage} — {error_message}")
+        logger.info(f"✅ Session {session_id}: failed at {error_stage} — {error_message}")
     except Exception as e:
-        print(f"⚠️  Failed to mark session as failed: {e}")
+        logger.warning(f"⚠️  Failed to mark session as failed: {e}")
 
 
 def update_session_clips_metadata(session_id: str, clips_metadata: list) -> None:
     """Store clip start/end/title/score metadata on the session row (queried by id)."""
     try:
         supabase.table("sessions").update({"clips_metadata": clips_metadata}).eq("id", session_id).execute()
-        print(f"✅ Session {session_id}: clips_metadata updated ({len(clips_metadata)} clips)")
+        logger.info(f"✅ Session {session_id}: clips_metadata updated ({len(clips_metadata)} clips)")
     except Exception as e:
-        print(f"⚠️  Failed to update session clips_metadata: {e}")
+        logger.warning(f"⚠️  Failed to update session clips_metadata: {e}")
 
 
 def complete_session(session_id: str, clip_paths: list, clips_metadata: list) -> None:
@@ -159,9 +162,9 @@ def complete_session(session_id: str, clip_paths: list, clips_metadata: list) ->
             "progress": 100,
             "current_stage": "completed",
         }).eq("id", session_id).execute()
-        print(f"✅ Session {session_id}: completed with {len(clip_paths)} clips")
+        logger.info(f"✅ Session {session_id}: completed with {len(clip_paths)} clips")
     except Exception as e:
-        print(f"⚠️  Failed to complete session: {e}")
+        logger.warning(f"⚠️  Failed to complete session: {e}")
 
 
 def delete_from_supabase(storage_path: str) -> bool:
@@ -175,13 +178,13 @@ def delete_from_supabase(storage_path: str) -> bool:
         bool: True if successful
     """
     try:
-        print(f"🗑️  Deleting from Supabase: {storage_path}")
+        logger.info(f"🗑️  Deleting from Supabase: {storage_path}")
 
         response = supabase.storage.from_(STORAGE_BUCKET).remove([storage_path])
 
-        print(f"✅ Deleted successfully")
+        logger.info(f"✅ Deleted successfully: {storage_path}")
         return True
 
     except Exception as e:
-        print(f"⚠️  Error deleting from Supabase: {e}")
+        logger.warning(f"⚠️  Error deleting from Supabase: {e}  path={storage_path}")
         return False

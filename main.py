@@ -24,6 +24,10 @@ from schemas import ClipSchema, CaptionDataSchema, RenderedVideoSchema, Transcri
 # Load environment variables from .env file
 load_dotenv()
 
+from utils.logger import setup_logging, get_logger, set_request_context
+setup_logging()
+logger = get_logger(__name__)
+
 from tasks.transcribe import transcribe_video
 from tasks.render import render_video
 from utils.supabase_client import upload_to_supabase, download_from_supabase
@@ -40,14 +44,14 @@ async def lifespan(app: FastAPI):
 
     Handles startup and shutdown events.
     """
-    print("Starting up Video Generator Worker API...")
+    logger.info("Starting up Video Generator Worker API...")
     start_worker()
     yield
     # Shutdown: stop queue worker then cleanup DB connections
-    print("Shutting down application...")
+    logger.info("Shutting down application...")
     stop_worker()
     await cleanup_connections()
-    print("Cleanup complete")
+    logger.info("Cleanup complete")
 
 
 app = FastAPI(
@@ -248,7 +252,7 @@ async def render_endpoint(request: RenderRequest):
                 else:
                     storage_path = full_path
 
-                print(f"🔍 Extracted storage path: {storage_path}")
+                logger.info(f"🔍 Extracted storage path: {storage_path}")
                 local_video_path = await download_from_supabase(storage_path)
             else:
                 # External URL, let render_video handle the download
@@ -269,9 +273,9 @@ async def render_endpoint(request: RenderRequest):
                 else:
                     caption_storage_path = full_path
 
-                print(f"🔍 Extracted caption storage path: {caption_storage_path}")
+                logger.info(f"🔍 Extracted caption storage path: {caption_storage_path}")
                 local_caption_path = await download_from_supabase(caption_storage_path)
-                print(f"✅ Downloaded caption file to: {local_caption_path}")
+                logger.info(f"✅ Downloaded caption file to: {local_caption_path}")
 
         # Render the video (with optional captions)
         result = await render_video(
@@ -373,10 +377,10 @@ async def process_video_workflow(request: ProcessVideoRequest):
     Poll the session status via Supabase or GET /process-video/queue-position/{session_id}
     to track progress.
     """
-    import traceback
-
     session_id = request.session_id or str(uuid.uuid4())
-    print(f"\n🚀 POST /process-video  session={session_id}  url={request.video_url}")
+    user_id = request.user_id or "anonymous"
+    set_request_context(user_id, session_id)
+    logger.info(f"🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
         # Verify session ownership when user_id is provided
@@ -386,7 +390,7 @@ async def process_video_workflow(request: ProcessVideoRequest):
         existing_clips = [c.model_dump() for c in request.existing_clips] if request.existing_clips else []
 
         queue_info = await enqueue_job(
-            user_id=request.user_id or "anonymous",
+            user_id=user_id,
             session_id=session_id,
             payload={
                 "video_url": request.video_url,
@@ -394,10 +398,7 @@ async def process_video_workflow(request: ProcessVideoRequest):
             },
         )
 
-        print(
-            f"  ✅ Job queued  session={session_id}"
-            f"  position={queue_info['queue_position']}\n"
-        )
+        logger.info(f"✅ Job queued  session={session_id}  position={queue_info['queue_position']}")
 
         return {
             "session_id": session_id,
@@ -415,10 +416,7 @@ async def process_video_workflow(request: ProcessVideoRequest):
             )
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        print(f"\n❌ /process-video FAILED at session={session_id}")
-        print(f"   Error type : {type(e).__name__}")
-        print(f"   Error msg  : {e}")
-        print(f"   Traceback  :\n{traceback.format_exc()}")
+        logger.exception(f"❌ /process-video FAILED at session={session_id}")
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
