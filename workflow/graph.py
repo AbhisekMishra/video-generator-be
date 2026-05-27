@@ -46,6 +46,16 @@ async def get_workflow() -> StateGraph:
     return _graph_instance
 
 
+def reset_thread(session_id: str) -> None:
+    """Delete the in-memory checkpoint for a session so the next ainvoke starts clean."""
+    thread_id = session_id
+    storage = _checkpointer.storage
+    keys_to_delete = [k for k in storage if (k[0] if isinstance(k, tuple) else k) == thread_id]
+    for k in keys_to_delete:
+        del storage[k]
+    logger.info(f"🗑️  Cleared checkpoint for thread {thread_id}")
+
+
 async def cleanup_connections():
     global _graph_instance
     _graph_instance = None

@@ -226,7 +226,7 @@ async def _mark_failed(job_id: str, error: str) -> None:
 
 async def _process_job(job: Dict[str, Any]) -> None:
     """Run the LangGraph workflow for a queued job."""
-    from workflow.graph import get_workflow, get_pool
+    from workflow.graph import get_workflow, get_pool, reset_thread
 
     job_id = job["id"]
     session_id = job["session_id"]
@@ -239,6 +239,9 @@ async def _process_job(job: Dict[str, Any]) -> None:
     try:
         workflow = await get_workflow()
         await get_pool()
+
+        # Clear any stale in-memory checkpoint so retries start with clean state
+        reset_thread(session_id)
 
         # Transition session from 'queued' → 'processing' now that work begins
         await asyncio.to_thread(
