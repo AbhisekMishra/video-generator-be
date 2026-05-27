@@ -450,7 +450,8 @@ async def generate_captions_node(state: VideoProcessingState) -> Dict[str, Any]:
             )
 
             if not ass_file_path:
-                raise ValueError(f"No words found in clip {i} timerange")
+                logger.warning(f"⚠️ No words found in clip {i} timerange — skipping captions for this clip")
+                continue
 
             # Upload to Supabase
             storage_path = f"sessions/{session_id}/captions/clip-{i}.ass"
