@@ -290,6 +290,9 @@ async def _process_job(job: Dict[str, Any]) -> None:
             await _mark_completed(job_id)
             logger.info(f"✅ Job {job_id} completed  session={session_id}")
 
+        # Free checkpoint memory — transcript/clips can be hundreds of KB per session
+        reset_thread(session_id)
+
     except Exception as e:
         err = f"{type(e).__name__}: {e}"
         logger.exception(f"❌ Job {job_id} FAILED  session={session_id}")
@@ -311,6 +314,7 @@ async def _process_job(job: Dict[str, Any]) -> None:
             )
         except Exception as sess_err:
             logger.error(f"❌ Safety-net session update failed  session={session_id}: {sess_err}")
+        reset_thread(session_id)
 
 
 async def _worker_loop() -> None:
