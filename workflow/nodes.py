@@ -146,6 +146,12 @@ async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
         - clips: List of 3 clips with {start, end, score, reason, hook}
         - currentStage: "generateCaptions" (move to next stage)
     """
+    # The graph is linear with no conditional edges, so a failure in an earlier node
+    # still reaches this one. Pass through untouched rather than overwriting the real
+    # error/stage a prior node already recorded with a misleading downstream one.
+    if state.get("errors"):
+        return {}
+
     logger.info("🔍 Identifying clips with AI...")
 
     # Get transcript from state (like state.transcript in JavaScript)
@@ -379,6 +385,9 @@ async def generate_captions_node(state: VideoProcessingState) -> Dict[str, Any]:
 
     Creates word-by-word karaoke-style captions and uploads to Supabase.
     """
+    if state.get("errors"):
+        return {}
+
     logger.info("📝 Generating captions for clips...")
 
     transcript = state.get("transcript")
@@ -467,6 +476,9 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
 
     Downloads video and captions, renders with FFmpeg, uploads to Supabase.
     """
+    if state.get("errors"):
+        return {}
+
     logger.info("🎬 Rendering videos...")
 
     clips = state.get("clips")

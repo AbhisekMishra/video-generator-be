@@ -27,7 +27,15 @@ async def get_youtube_info(url: str) -> dict:
     """
     import yt_dlp
 
-    ydl_opts = {'quiet': True, 'no_warnings': True, 'skip_download': True}
+    ydl_opts = {
+        'quiet': True,
+        'no_warnings': True,
+        'skip_download': True,
+        # android/ios clients skip the web client's JS-signature challenge and bot-check
+        # gate entirely — they serve pre-signed URLs, which is why they dodge YouTube's
+        # "Sign in to confirm you're not a bot" block that the web client hits.
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
+    }
 
     def _extract():
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -78,6 +86,8 @@ async def download_youtube_video(url: str) -> str:
         'merge_output_format': 'mp4',
         'quiet': False,
         'no_warnings': False,
+        # See get_youtube_info's comment — same bot-check bypass for the actual download.
+        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
     }
 
     def _download():
