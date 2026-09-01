@@ -20,7 +20,6 @@ import uvicorn
 import os
 import uuid
 from dotenv import load_dotenv
-from schemas import ClipSchema, CaptionDataSchema, RenderedVideoSchema, TranscriptWordSchema
 
 # Load environment variables from .env file
 load_dotenv()
@@ -29,20 +28,11 @@ from utils.logger import setup_logging, get_logger, set_request_context
 setup_logging()
 logger = get_logger(__name__)
 
-from tasks.transcribe import transcribe_video
-from tasks.render import render_video
-from utils.supabase_client import upload_to_supabase, download_from_supabase
-from utils.caption_generator import create_ass_file_for_clip
 from utils.file_utils import get_youtube_info, is_youtube_url, MAX_VIDEO_DURATION_SECONDS
-from workflow.graph import get_workflow, cleanup_connections
 from utils.quota import verify_session_owner
 from utils.queue_manager import enqueue_job, get_queue_status, start_worker, stop_worker, worker_health
 from utils.validation import validate_session_id, validate_video_url
 from utils.supabase_client import supabase
-
-# Bounds concurrent Whisper/FFmpeg work triggered by the standalone endpoints
-# (/transcribe, /render), which sit outside the job queue's MAX_CONCURRENT_JOBS cap.
-_STANDALONE_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_STANDALONE_JOBS", "2")))
 
 
 @asynccontextmanager
@@ -55,10 +45,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up Video Generator Worker API...")
     start_worker()
     yield
-    # Shutdown: stop queue worker (draining in-flight jobs briefly) then cleanup DB connections
+    # Shutdown: stop queue worker, draining in-flight jobs briefly
     logger.info("Shutting down application...")
     await stop_worker()
-    await cleanup_connections()
     logger.info("Cleanup complete")
 
 
@@ -153,279 +142,10 @@ async def validate_youtube(request: ValidateYoutubeRequest):
     return {"duration": duration, "title": info["title"]}
 
 
-class TranscribeRequest(BaseModel):
-    video_url: Optional[str] = None
-    video_path: Optional[str] = None
-
-
-class RenderRequest(BaseModel):
-    video_url: Optional[str] = None
-    video_path: Optional[str] = None
-    center_x: Optional[int] = None
-    start: float
-    end: float
-    session_id: Optional[str] = None  # For Supabase storage path
-    clip_index: Optional[int] = None  # For naming the clip file
-    caption_url: Optional[str] = None  # Supabase URL of ASS subtitle file
-
-
-TranscriptWord = TranscriptWordSchema
-
-
-class TranscribeResponse(BaseModel):
-    text: str
-    words: List[TranscriptWordSchema]
-    language: Optional[str] = None
-
-
-class RenderResponse(BaseModel):
-    url: str  # Supabase public URL
-    duration: float
-    storage_path: str  # Path in Supabase storage
-
-
-class GenerateCaptionsRequest(BaseModel):
-    words: List[TranscriptWordSchema]
-    clip_start: float
-    clip_end: float
-    session_id: str
-    clip_index: int
-    style: Optional[str] = "highlight"  # 'highlight', 'phrase', or 'static'
-
-
-class GenerateCaptionsResponse(BaseModel):
-    caption_url: str  # Supabase public URL of ASS file
-    storage_path: str  # Path in Supabase storage
-
-
 @app.get("/")
 async def root():
     return {"message": "Video Generator Worker API", "status": "running"}
 
-
-@app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_endpoint(request: TranscribeRequest):
-    """
-    Transcribe video using Whisper AI.
-
-    Returns transcript text with word-level timestamps and detected language.
-    """
-    try:
-        if not request.video_url and not request.video_path:
-            raise HTTPException(
-                status_code=400,
-                detail="video_url or video_path is required"
-            )
-        if request.video_url:
-            validate_video_url(request.video_url)
-
-        async with _STANDALONE_SEMAPHORE:
-            result = await transcribe_video(
-                video_url=request.video_url,
-                video_path=request.video_path
-            )
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/generate-captions", response_model=GenerateCaptionsResponse)
-async def generate_captions_endpoint(request: GenerateCaptionsRequest):
-    """
-    Generate ASS subtitle file for a video clip and upload to Supabase.
-
-    Parameters:
-    - words: Transcript words with timestamps
-    - clip_start: Start time of clip in original video
-    - clip_end: End time of clip in original video
-    - session_id: Session ID for storage path organization
-    - clip_index: Index of the clip for naming
-    - style: Caption style ('highlight', 'phrase', or 'static')
-
-    Returns Supabase public URL and storage path of ASS file.
-    """
-    ass_file_path = None
-
-    try:
-        validate_session_id(request.session_id)
-
-        # Convert Pydantic models to dicts for caption generator
-        words_dict = [word.model_dump() for word in request.words]
-
-        # Generate ASS subtitle file
-        ass_file_path = create_ass_file_for_clip(
-            words=words_dict,
-            clip_start=request.clip_start,
-            clip_end=request.clip_end,
-            style=request.style
-        )
-
-        if not ass_file_path:
-            raise HTTPException(
-                status_code=400,
-                detail="No words found in clip timerange"
-            )
-
-        # Upload to Supabase
-        storage_path = f"sessions/{request.session_id}/captions/clip-{request.clip_index}.ass"
-        caption_url = upload_to_supabase(ass_file_path, storage_path)
-
-        # Cleanup temp file
-        if ass_file_path and os.path.exists(ass_file_path):
-            os.remove(ass_file_path)
-
-        return {
-            "caption_url": caption_url,
-            "storage_path": storage_path
-        }
-
-    except HTTPException:
-        # Cleanup on error
-        if ass_file_path and os.path.exists(ass_file_path):
-            os.remove(ass_file_path)
-        raise
-    except Exception as e:
-        # Cleanup on error
-        if ass_file_path and os.path.exists(ass_file_path):
-            os.remove(ass_file_path)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/render", response_model=RenderResponse)
-async def render_endpoint(request: RenderRequest):
-    """
-    Trim video to specified time range, burn captions, and upload to Supabase.
-
-    Parameters:
-    - video_url: URL of video in Supabase storage (or external URL)
-    - video_path: Optional local path (if not using video_url)
-    - center_x: (Optional) X coordinate for center of crop - crops to 9:16 aspect ratio
-    - start: Start time in seconds
-    - end: End time in seconds
-    - session_id: Session ID for storage path organization
-    - clip_index: Index of the clip for naming
-    - caption_url: (Optional) Supabase URL of ASS subtitle file to burn into video
-
-    Returns Supabase public URL, duration, and storage path.
-    """
-    local_video_path = None
-    rendered_video_path = None
-    local_caption_path = None
-
-    try:
-        if not request.video_url and not request.video_path:
-            raise HTTPException(
-                status_code=400,
-                detail="video_url or video_path is required"
-            )
-        if request.video_url:
-            validate_video_url(request.video_url)
-        if request.session_id:
-            validate_session_id(request.session_id)
-
-        # If video_url is provided and looks like a Supabase URL, download it first
-        if request.video_url and "supabase" in request.video_url:
-            # Extract storage path from Supabase URL
-            # URL format: https://PROJECT.supabase.co/storage/v1/object/public/BUCKET/PATH
-            parts = request.video_url.split("/storage/v1/object/public/")
-            if len(parts) == 2:
-                full_path = parts[1].split("?")[0]  # Remove query params if any
-                # Remove bucket name from path (first segment)
-                path_parts = full_path.split("/", 1)
-                if len(path_parts) == 2:
-                    storage_path = path_parts[1]  # Path without bucket name
-                else:
-                    storage_path = full_path
-
-                logger.info(f"🔍 Extracted storage path: {storage_path}")
-                local_video_path = await download_from_supabase(storage_path)
-            else:
-                # External URL, let render_video handle the download
-                local_video_path = None
-        elif request.video_path:
-            local_video_path = request.video_path
-
-        # Download caption file if provided
-        if request.caption_url and "supabase" in request.caption_url:
-            # Extract storage path from Supabase URL
-            parts = request.caption_url.split("/storage/v1/object/public/")
-            if len(parts) == 2:
-                full_path = parts[1].split("?")[0]  # Remove query params if any
-                # Remove bucket name from path (first segment)
-                path_parts = full_path.split("/", 1)
-                if len(path_parts) == 2:
-                    caption_storage_path = path_parts[1]  # Path without bucket name
-                else:
-                    caption_storage_path = full_path
-
-                logger.info(f"🔍 Extracted caption storage path: {caption_storage_path}")
-                local_caption_path = await download_from_supabase(caption_storage_path)
-                logger.info(f"✅ Downloaded caption file to: {local_caption_path}")
-
-        # Render the video (with optional captions)
-        async with _STANDALONE_SEMAPHORE:
-            result = await render_video(
-                video_url=request.video_url if not local_video_path else None,
-                video_path=local_video_path,
-                center_x=request.center_x,
-                start=request.start,
-                end=request.end,
-                subtitle_path=local_caption_path
-            )
-
-        rendered_video_path = result["output_path"]
-        duration = result["duration"]
-
-        # Upload to Supabase if session_id is provided
-        if request.session_id is not None and request.clip_index is not None:
-            storage_path = f"sessions/{request.session_id}/clips/clip-{request.clip_index}.mp4"
-            public_url = upload_to_supabase(rendered_video_path, storage_path)
-
-            # Cleanup local files
-            if local_video_path and os.path.exists(local_video_path):
-                os.remove(local_video_path)
-            if local_caption_path and os.path.exists(local_caption_path):
-                os.remove(local_caption_path)
-            if rendered_video_path and os.path.exists(rendered_video_path):
-                os.remove(rendered_video_path)
-
-            return {
-                "url": public_url,
-                "duration": duration,
-                "storage_path": storage_path
-            }
-        else:
-            # Fallback: return local path if no session_id (for testing)
-            return {
-                "url": rendered_video_path,
-                "duration": duration,
-                "storage_path": ""
-            }
-
-    except HTTPException:
-        # Cleanup on error
-        if local_video_path and os.path.exists(local_video_path):
-            os.remove(local_video_path)
-        if local_caption_path and os.path.exists(local_caption_path):
-            os.remove(local_caption_path)
-        if rendered_video_path and os.path.exists(rendered_video_path):
-            os.remove(rendered_video_path)
-        raise
-    except Exception as e:
-        # Cleanup on error
-        if local_video_path and os.path.exists(local_video_path):
-            os.remove(local_video_path)
-        if local_caption_path and os.path.exists(local_caption_path):
-            os.remove(local_caption_path)
-        if rendered_video_path and os.path.exists(rendered_video_path):
-            os.remove(rendered_video_path)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ==================== LangGraph Workflow Endpoints ====================
 
 class ExistingClipSchema(BaseModel):
     start: float
@@ -449,21 +169,11 @@ class ProcessVideoResponse(BaseModel):
     estimated_wait_seconds: Optional[int] = None
 
 
-class StatusResponse(BaseModel):
-    session_id: str
-    current_stage: Optional[str]
-    clips: Optional[List[ClipSchema]]
-    captions: Optional[List[CaptionDataSchema]]
-    rendered_videos: Optional[List[RenderedVideoSchema]]
-    errors: Optional[List[str]]
-    is_complete: bool
-
-
 @app.post("/process-video", response_model=ProcessVideoResponse, status_code=202)
 async def process_video_workflow(request: ProcessVideoRequest):
     """
     Enqueue a video processing job. Returns 202 immediately with queue position.
-    Poll the session status via Supabase or GET /process-video/queue-position/{session_id}
+    Poll session status via Supabase or GET /process-video/queue-position/{session_id}
     to track progress.
     """
     if not request.session_id:
@@ -519,56 +229,6 @@ async def process_video_workflow(request: ProcessVideoRequest):
         raise HTTPException(status_code=500, detail=f"{type(e).__name__}: {e}")
 
 
-@app.get("/process-video/status/{session_id}")
-async def get_processing_status(session_id: str):
-    """
-    Poll current workflow state from the in-memory checkpointer. That checkpointer
-    is lost on every process restart/redeploy, so if it has nothing for this session
-    (current_stage is None) fall back to the durable `sessions` table instead of
-    reporting an empty/misleading state.
-    """
-    workflow = await get_workflow()
-    config = {"configurable": {"thread_id": session_id}}
-    try:
-        snapshot = await workflow.aget_state(config)
-        values = snapshot.values if snapshot else {}
-        current_stage = values.get("currentStage")
-
-        if current_stage is None:
-            session_result = await asyncio.to_thread(
-                lambda: supabase.table("sessions")
-                .select("status, current_stage, error_message, clips_metadata")
-                .eq("id", session_id)
-                .maybe_single()
-                .execute()
-            )
-            session = session_result.data if session_result else None
-            if session:
-                return {
-                    "session_id": session_id,
-                    "current_stage": session.get("current_stage") or session.get("status"),
-                    "is_complete": session.get("status") == "completed",
-                    "clips": session.get("clips_metadata"),
-                    "captions": None,
-                    "rendered_videos": None,
-                    "errors": [session["error_message"]] if session.get("error_message") else None,
-                }
-
-        all_errors = values.get("errors") or []
-        errors = [e for e in all_errors if e and str(e).strip()]
-        return {
-            "session_id": session_id,
-            "current_stage": current_stage,
-            "is_complete": current_stage == "completed",
-            "clips": values.get("clips"),
-            "captions": values.get("captions"),
-            "rendered_videos": values.get("renderedVideos"),
-            "errors": errors or None,
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/process-video/queue-position/{session_id}")
 async def get_queue_position(session_id: str):
     """Return the current queue position and estimated wait for a session."""
@@ -581,7 +241,6 @@ async def get_queue_position(session_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 
 if __name__ == "__main__":

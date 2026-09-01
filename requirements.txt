@@ -25,15 +25,8 @@ yt-dlp>=2024.1.0
 # For macOS: brew install ffmpeg
 # For Windows: Download from https://ffmpeg.org/download.html
 
-# LangGraph for workflow orchestration.
-# Deliberately NOT upper-bounded here: this ecosystem ships frequent breaking major
-# releases and I couldn't verify which major versions are actually deployed/tested
-# (the local venv found in this repo doesn't even have these installed). Before
-# capping these, run `pip freeze` against the real deployment venv and pin exact
-# versions (==) instead of guessing a ceiling that might already be violated.
-langgraph>=0.2.59
-langchain-anthropic>=0.3.0
-langchain-core>=0.3.28
+# Anthropic API client (clip identification in workflow/pipeline.py)
+anthropic>=0.40.0,<2.0.0
 
 # Logo overlay: Pillow renders the AM logo geometry in pure Python (no native libs needed)
 Pillow>=10.0.0,<12.0.0

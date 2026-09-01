@@ -251,8 +251,8 @@ async def _mark_failed(job_id: str, error: str) -> None:
 
 
 async def _process_job(job: Dict[str, Any]) -> None:
-    """Run the LangGraph workflow for a queued job."""
-    from workflow.graph import get_workflow, get_pool, reset_thread
+    """Run the video processing pipeline for a queued job."""
+    from workflow.pipeline import run_pipeline, _StageFailed
 
     job_id = job["id"]
     session_id = job["session_id"]
@@ -262,14 +262,11 @@ async def _process_job(job: Dict[str, Any]) -> None:
     set_request_context(user_id, session_id)
     logger.info(f"⚙️  Processing job {job_id}  session={session_id}  user={user_id}")
 
+    # Transition session from 'queued' → 'processing' now that work begins. If this is
+    # a retry of a job that got partway through before failing, run_pipeline resumes
+    # from the first stage not already cached in pipeline_state — this is just the
+    # starting point the UI shows before that fast-forward happens.
     try:
-        workflow = await get_workflow()
-        await get_pool()
-
-        # Clear any stale in-memory checkpoint so retries start with clean state
-        reset_thread(session_id)
-
-        # Transition session from 'queued' → 'processing' now that work begins
         await asyncio.to_thread(
             lambda: supabase.table("sessions")
             .update({
@@ -280,67 +277,44 @@ async def _process_job(job: Dict[str, Any]) -> None:
             .eq("id", session_id)
             .execute()
         )
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to mark session {session_id} as processing: {e}")
 
-        config = {"configurable": {"thread_id": session_id}}
-        result = await workflow.ainvoke(
-            {
-                "videoUrl": payload["video_url"],
-                "sessionId": session_id,
-                "existingClips": payload.get("existing_clips", []),
-            },
-            config,
-        )
+    try:
+        await run_pipeline(session_id, payload["video_url"], payload.get("existing_clips", []))
+        await _mark_completed(job_id)
+        logger.info(f"✅ Job {job_id} completed  session={session_id}")
 
-        # Nodes return errors in state rather than raising — treat as job failure.
-        # The graph has no conditional edges so ainvoke() always returns without raising.
-        if result.get("errors"):
-            err = "; ".join(str(e) for e in result["errors"])
-            logger.error(f"❌ Job {job_id} workflow errors  session={session_id}: {err}")
-            await _mark_failed(job_id, err)
-            # Safety net: ensure session is failed even if the node's fail_session() call failed
-            try:
-                stage = result.get("currentStage") or "unknown"
-                await asyncio.to_thread(
-                    lambda: supabase.table("sessions")
-                    .update({
-                        "status": "failed",
-                        "error_message": err[:2000],
-                        "error_stage": stage,
-                    })
-                    .eq("id", session_id)
-                    .execute()
-                )
-            except Exception as sess_err:
-                logger.error(f"❌ Safety-net session update failed  session={session_id}: {sess_err}")
-        else:
-            await _mark_completed(job_id)
-            logger.info(f"✅ Job {job_id} completed  session={session_id}")
-
-        # Free checkpoint memory — transcript/clips can be hundreds of KB per session
-        reset_thread(session_id)
+    except _StageFailed as e:
+        # The stage that failed already called fail_session() with a specific error
+        # and stage name — nothing more to record on the session itself.
+        logger.error(f"❌ Job {job_id} failed  session={session_id}: {e}")
+        try:
+            await _mark_failed(job_id, str(e))
+        except Exception as mark_err:
+            logger.error(f"❌ Failed to mark job {job_id} as failed in queue: {mark_err}")
 
     except Exception as e:
+        # Truly unexpected — no stage got the chance to record a specific error.
         err = f"{type(e).__name__}: {e}"
-        logger.exception(f"❌ Job {job_id} FAILED  session={session_id}")
+        logger.exception(f"❌ Job {job_id} FAILED unexpectedly  session={session_id}")
         try:
             await _mark_failed(job_id, err)
         except Exception as mark_err:
             logger.error(f"❌ Failed to mark job {job_id} as failed in queue: {mark_err}")
-        # Safety net: update session status directly in case nodes never did
         try:
             await asyncio.to_thread(
                 lambda: supabase.table("sessions")
                 .update({
                     "status": "failed",
                     "error_message": err[:2000],
-                    "error_stage": "processing",
+                    "error_stage": "unknown",
                 })
                 .eq("id", session_id)
                 .execute()
             )
         except Exception as sess_err:
             logger.error(f"❌ Safety-net session update failed  session={session_id}: {sess_err}")
-        reset_thread(session_id)
 
 
 async def _worker_loop() -> None:

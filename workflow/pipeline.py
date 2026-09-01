@@ -1,35 +1,63 @@
 """
-Workflow Nodes for Video Processing
+Video Processing Pipeline
 
-Each node represents a stage in the video processing pipeline.
-Nodes receive the current state and return updates to merge into the state.
+Plain sequential pipeline: transcribe -> identify clips -> generate captions -> render.
+Each stage's output is cached in the session's `pipeline_state` (Supabase) as it
+completes, so a retried job resumes from the first incomplete stage instead of
+redoing expensive work (Whisper, an LLM call, FFmpeg renders) from scratch.
+
+A stage raises _StageFailed after calling fail_session() with a specific, real error —
+the caller (utils/queue_manager.py) doesn't need to inspect anything to know what
+happened or where; the first failure stops the pipeline immediately.
 """
 
 import asyncio
 import json
 import os
 import re
-import traceback
-from typing import Dict, Any
-from langchain_anthropic import ChatAnthropic
+from typing import Any, Dict, List, Optional, Tuple
+
+from anthropic import AsyncAnthropic
 
 from utils.logger import get_logger, log_conversion_success
 logger = get_logger(__name__)
 
-from workflow.state import VideoProcessingState, Clip
 from tasks.transcribe import transcribe_video
+from tasks.render import render_video
 from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
-from utils.supabase_client import upload_to_supabase, download_from_supabase
-from utils.supabase_client import update_session_model, complete_session, fail_session
-from tasks.render import render_video
+from workflow.state import Transcript, TranscriptWord, Clip, CaptionData, ExistingClip
+from utils.supabase_client import (
+    upload_to_supabase,
+    download_from_supabase,
+    update_session_model,
+    complete_session,
+    fail_session,
+    get_pipeline_state,
+    save_pipeline_state,
+)
 
 CLIPS_MODEL = "claude-haiku-4-5-20251001"
 
 _SENTENCE_ENDERS = (".", "!", "?")
 
+_anthropic_client: Optional[AsyncAnthropic] = None
 
-def _snap_to_sentence_end(end_time: float, words: list, max_extend: float = 10.0) -> float:
+
+class _StageFailed(Exception):
+    """A stage already called fail_session() with a specific error before raising this —
+    callers should stop without recording a second, less specific one."""
+    pass
+
+
+def _get_anthropic_client() -> AsyncAnthropic:
+    global _anthropic_client
+    if _anthropic_client is None:
+        _anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+    return _anthropic_client
+
+
+def _snap_to_sentence_end(end_time: float, words: List[Dict], max_extend: float = 10.0) -> float:
     """
     Extend end_time forward to the end of the nearest sentence-ending word (., !, or ?)
     so a clip closes its thought instead of cutting off mid-dialogue. Only searches
@@ -47,78 +75,57 @@ def _snap_to_sentence_end(end_time: float, words: list, max_extend: float = 10.0
     return end_time
 
 
-async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
+async def _transcribe_stage(video_url: str, session_id: str) -> Tuple[Transcript, Optional[str]]:
     """
-    Node 1: Transcribe video using Whisper AI.
+    Download (if YouTube) and transcribe the video with Whisper.
 
-    This is the first step in the workflow. It takes the video and:
-    1. Downloads the video from the URL
-    2. Extracts audio using FFmpeg
-    3. Transcribes with Whisper to get word-level timestamps
-
-    Args:
-        state: Current workflow state (contains videoUrl, sessionId, etc.)
-
-    Returns:
-        Dictionary with updates to merge into state:
-        - transcript: {text, words, language}
-        - currentStage: "identifyClips" (move to next stage)
+    Returns (transcript, local_video_path). local_video_path is the downloaded YouTube
+    file, reused by the render stage to avoid re-downloading per clip; it's None for
+    non-YouTube URLs (FFmpeg streams directly from video_url instead).
     """
-    logger.info(f"🎤 Transcribing video...  url={state.get('videoUrl')}  path={state.get('videoPath')}  session={state.get('sessionId')}")
-
-    video_url = state.get("videoUrl")
+    logger.info(f"🎤 Transcribing video...  url={video_url}  session={session_id}")
     local_video_path = None
 
     try:
-        # Download YouTube videos once here so render_node can reuse the same file
-        if video_url and is_youtube_url(video_url):
+        if is_youtube_url(video_url):
             logger.info(f"📥 Downloading YouTube video (once for full pipeline): {video_url}")
             local_video_path = await download_youtube_video(video_url)
             logger.info(f"✅ YouTube video downloaded to: {local_video_path}")
 
         result = await transcribe_video(
             video_url=video_url if not local_video_path else None,
-            video_path=local_video_path or state.get("videoPath")
+            video_path=local_video_path,
         )
 
         words = result.get("words", [])
         logger.info(f"✅ Transcription successful! Got {len(words)} words  language={result.get('language')}")
 
-        # Fail fast if Whisper found no speech — downstream nodes can't work without words
         if not words:
-            session_id = state.get("sessionId")
             if local_video_path and os.path.exists(local_video_path):
                 os.remove(local_video_path)
-            if session_id:
-                fail_session(session_id, "no_speech_detected", "transcribe")
-            return {
-                "errors": ["no_speech_detected"],
-                "currentStage": "transcribe"
-            }
+            fail_session(session_id, "no_speech_detected", "transcribe")
+            raise _StageFailed("no_speech_detected")
 
         log_conversion_success(
             logger, "transcribe",
             words=len(words),
             language=result.get("language", "unknown"),
-            video_url=video_url or state.get("videoPath", ""),
+            video_url=video_url,
         )
 
-        updates: Dict[str, Any] = {
-            "transcript": {
-                "text": result["text"],
-                "words": words,
-                "language": result.get("language")
-            },
-            "localVideoPath": local_video_path,  # None for non-YouTube; render_node reuses this
-            "currentStage": "identifyClips"
+        transcript = {
+            "text": result["text"],
+            "words": words,
+            "language": result.get("language"),
         }
+        return transcript, local_video_path
 
-        return updates
+    except _StageFailed:
+        raise
 
     except ValueError as e:
         # Structured validation errors from ffprobe checks or duration limits
         error_code = str(e)
-        # Translate video_too_long:<minutes>:<limit> into a human-readable message
         if error_code.startswith("video_too_long:"):
             parts = error_code.split(":")
             minutes = parts[1] if len(parts) > 1 else "?"
@@ -127,66 +134,26 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
         logger.error(f"❌ Video validation failed: {error_code}  video_url={video_url}")
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
-        session_id = state.get("sessionId")
-        if session_id:
-            fail_session(session_id, error_code, "transcribe")
-        return {
-            "errors": [error_code],
-            "currentStage": "transcribe"
-        }
+        fail_session(session_id, error_code, "transcribe")
+        raise _StageFailed(error_code) from e
 
     except Exception as e:
         logger.exception(f"❌ Transcription failed  video_url={video_url}")
-
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
-
-        session_id = state.get("sessionId")
-        if session_id:
-            fail_session(session_id, str(e), "transcribe")
-
-        return {
-            "errors": [str(e)],
-            "currentStage": "transcribe"
-        }
+        fail_session(session_id, str(e), "transcribe")
+        raise _StageFailed(str(e)) from e
 
 
-async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
-    """
-    Node 2: Identify best clips using AI (Claude Haiku).
-
-    This node uses a Large Language Model (LLM) to analyze the transcript
-    and identify the 3 most engaging clips for short-form content.
-
-    Args:
-        state: Current workflow state (must contain transcript)
-
-    Returns:
-        Dictionary with updates:
-        - clips: List of 3 clips with {start, end, score, reason, hook}
-        - currentStage: "generateCaptions" (move to next stage)
-    """
-    # The graph is linear with no conditional edges, so a failure in an earlier node
-    # still reaches this one. Pass through untouched rather than overwriting the real
-    # error/stage a prior node already recorded with a misleading downstream one.
-    if state.get("errors"):
-        return {}
-
+async def _identify_clips_stage(
+    session_id: str,
+    transcript: Transcript,
+    existing_clips: List[ExistingClip],
+) -> Tuple[List[Clip], str]:
+    """Use Claude to pick the best clips from the transcript. Returns (clips, model_name)."""
     logger.info("🔍 Identifying clips with AI...")
 
-    # Get transcript from state (like state.transcript in JavaScript)
-    transcript = state.get("transcript")
-    if not transcript:
-        logger.error("❌ No transcript found in state")
-        return {
-            "errors": ["No transcript available"],
-            "currentStage": "identifyClips"
-        }
-
     try:
-        session_id = state.get("sessionId")
-
-        # Detect where speech actually starts so we don't pick music-only sections
         words = transcript.get("words", [])
         first_word_at = words[0]["start"] if words else 0.0
         last_word_at = words[-1]["end"] if words else 0.0
@@ -224,8 +191,6 @@ async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
                 f"{len(transcript_text_for_prompt)} chars across {len(segments)} segments"
             )
 
-        # Build existing clips exclusion section for the prompt
-        existing_clips = state.get("existingClips") or []
         existing_clips_section = ""
         if existing_clips:
             lines = "\n".join(
@@ -239,7 +204,6 @@ ALREADY GENERATED CLIPS (DO NOT overlap these — find different moments):
 Each new clip must not overlap any existing clip by more than 5 seconds.
 """
 
-        # Construct prompt (instructions for the AI)
         prompt = f"""You are an expert video editor analyzing a transcript to identify the best 3 short-form clips for social media.
 
 Transcript:
@@ -276,21 +240,25 @@ Return your response as a JSON array of clips. Example:
 
 IMPORTANT: Return ONLY the JSON array, no additional text."""
 
+        client = _get_anthropic_client()
         model_name = CLIPS_MODEL
-        llm = ChatAnthropic(
-            model=model_name,
-            temperature=0.7,
-            api_key=os.getenv("ANTHROPIC_API_KEY"),
-        )
-
         MAX_ATTEMPTS = 3
         content = None
+        clips = None
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             logger.info(f"📡 Calling LLM ({model_name}, attempt {attempt}/{MAX_ATTEMPTS})...")
             try:
-                response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=60)
-                content = str(response.content)
+                response = await asyncio.wait_for(
+                    client.messages.create(
+                        model=model_name,
+                        max_tokens=4096,
+                        temperature=0.7,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                    timeout=60,
+                )
+                content = response.content[0].text
             except asyncio.TimeoutError:
                 logger.warning(f"⏱️ {model_name} timed out (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
                 content = None
@@ -302,7 +270,6 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
 
             logger.info(f"🤖 LLM raw response ({model_name}):\n{content}\n{'=' * 80}")
 
-            # Parse JSON — if unparseable, retry
             json_match = re.search(r'\[[\s\S]*\]', content)
             if not json_match:
                 logger.warning(f"⚠️ {model_name} returned unparseable response (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
@@ -318,7 +285,9 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
                 continue
 
         if content is None:
-            raise RuntimeError(f"{model_name} failed to produce a valid response after {MAX_ATTEMPTS} attempts")
+            msg = f"{model_name} failed to produce a valid response after {MAX_ATTEMPTS} attempts"
+            fail_session(session_id, msg, "identifyClips")
+            raise _StageFailed(msg)
 
         normalized_clips = []
         for clip in clips:
@@ -326,7 +295,6 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
             raw_end   = float(clip["end"])
             duration  = raw_end - raw_start
 
-            # ── Hard duration enforcement ───────────────────────────────
             # Reject clips shorter than 20s (not enough content)
             if duration < 20:
                 logger.warning(f"  ⚠️  Skipping clip {raw_start:.1f}–{raw_end:.1f}s: too short ({duration:.0f}s)")
@@ -349,7 +317,7 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
                 "title": str(clip["title"]) if clip.get("title") else None,
             })
 
-        # Post-validation: drop clips that overlap existing clips by more than 5s
+        # Drop clips that overlap existing clips (regeneration) by more than 5s
         if existing_clips:
             filtered = []
             for nc in normalized_clips:
@@ -366,75 +334,34 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
 
         logger.info(f"✅ Parsed Clips (after duration enforcement):\n{json.dumps(normalized_clips, indent=2)}")
 
-        if session_id:
-            update_session_model(session_id, model_name)
+        if not normalized_clips:
+            fail_session(session_id, "No clips available", "identifyClips")
+            raise _StageFailed("No clips available")
 
-        log_conversion_success(
-            logger, "identify_clips",
-            clips=len(normalized_clips),
-            model=model_name,
-        )
+        update_session_model(session_id, model_name)
+        log_conversion_success(logger, "identify_clips", clips=len(normalized_clips), model=model_name)
 
-        return {
-            "clips": normalized_clips,
-            "currentStage": "generateCaptions",
-            "llmRawResponse": content,
-            "selectedModel": model_name
-        }
+        return normalized_clips, model_name
 
+    except _StageFailed:
+        raise
     except Exception as e:
         logger.exception("❌ Clip identification failed")
-        return {
-            "errors": [str(e)],
-            "currentStage": "identifyClips"
-        }
+        fail_session(session_id, str(e), "identifyClips")
+        raise _StageFailed(str(e)) from e
 
 
-async def generate_captions_node(state: VideoProcessingState) -> Dict[str, Any]:
-    """
-    Node 3: Generate ASS captions for each clip.
-
-    Creates word-by-word karaoke-style captions and uploads to Supabase.
-    """
-    if state.get("errors"):
-        return {}
-
+async def _generate_captions_stage(session_id: str, transcript_words: List[TranscriptWord], clips: List[Clip]) -> List[CaptionData]:
+    """Generate an ASS caption file per clip and upload it to Supabase."""
     logger.info("📝 Generating captions for clips...")
-
-    transcript = state.get("transcript")
-    clips = state.get("clips")
-    session_id = state.get("sessionId")
-
-    if not transcript or not transcript.get("words"):
-        logger.error("❌ No transcript words available")
-        return {
-            "errors": ["No transcript words available"],
-            "currentStage": "generateCaptions"
-        }
-
-    if not clips:
-        logger.error("❌ No clips available for caption generation")
-        return {
-            "errors": ["No clips available"],
-            "currentStage": "generateCaptions"
-        }
-
-    if not session_id:
-        logger.error("❌ No sessionId provided for caption generation")
-        return {
-            "errors": ["No sessionId provided"],
-            "currentStage": "generateCaptions"
-        }
 
     try:
         captions = []
-
         for i, clip in enumerate(clips):
             logger.info(f"📝 Generating captions for clip {i + 1}/{len(clips)}...  title='{clip.get('title')}'")
 
-            # Generate ASS file (includes header and word captions)
             ass_file_path = create_ass_file_for_clip(
-                words=transcript["words"],
+                words=transcript_words,
                 clip_start=clip["start"],
                 clip_end=clip["end"],
                 style="highlight",
@@ -445,111 +372,76 @@ async def generate_captions_node(state: VideoProcessingState) -> Dict[str, Any]:
                 logger.warning(f"⚠️ No words found in clip {i} timerange — skipping captions for this clip")
                 continue
 
-            # Upload to Supabase
             storage_path = f"sessions/{session_id}/captions/clip-{i}.ass"
             caption_url = upload_to_supabase(ass_file_path, storage_path)
 
-            # Cleanup temp file
             if os.path.exists(ass_file_path):
                 os.remove(ass_file_path)
 
             logger.info(f"✅ Captions for clip {i + 1} generated: {storage_path}")
-
-            captions.append({
-                "clipIndex": i,
-                "captionUrl": caption_url,
-                "storagePath": storage_path
-            })
+            captions.append({"clipIndex": i, "captionUrl": caption_url, "storagePath": storage_path})
 
         logger.info(f"🎉 All {len(captions)} caption files generated successfully!")
         log_conversion_success(logger, "generate_captions", clips=len(captions))
-
-        return {
-            "captions": captions,
-            "currentStage": "render"
-        }
+        return captions
 
     except Exception as e:
         logger.exception("❌ Caption generation failed")
-        return {
-            "errors": [str(e)],
-            "currentStage": "generateCaptions"
-        }
+        fail_session(session_id, str(e), "generateCaptions")
+        raise _StageFailed(str(e)) from e
 
 
-async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
+async def _render_stage(
+    session_id: str,
+    clips: List[Clip],
+    captions: List[CaptionData],
+    local_video_path: Optional[str],
+    video_url: str,
+    pipeline_state: Dict[str, Any],
+) -> Tuple[List[str], List[Dict]]:
     """
-    Node 4: Render final videos with burned-in captions.
-
-    Downloads video and captions, renders with FFmpeg, uploads to Supabase.
+    Render each clip with FFmpeg and upload it. Already-rendered clips (from a prior
+    attempt that crashed partway through) are persisted in pipeline_state["rendered"]
+    and skipped — a retry only re-renders what's actually missing.
     """
-    if state.get("errors"):
-        return {}
-
     logger.info("🎬 Rendering videos...")
-
-    clips = state.get("clips")
-    captions = state.get("captions")
-    session_id = state.get("sessionId")
-    local_video_path = state.get("localVideoPath")  # pre-downloaded YouTube file from transcribe_node
-    # If transcribe_node already downloaded the video, use that local file; avoids re-downloading per clip
-    video_url = None if local_video_path else state.get("videoUrl")
-    video_path = local_video_path or state.get("videoPath")
-
-    if not clips:
-        logger.error("❌ No clips available for rendering")
-        return {
-            "errors": ["No clips available"],
-            "currentStage": "render"
-        }
-
-    if not session_id:
-        logger.error("❌ No sessionId provided for rendering")
-        return {
-            "errors": ["No sessionId provided"],
-            "currentStage": "render"
-        }
+    rendered: Dict[str, Dict] = pipeline_state.setdefault("rendered", {})
+    render_video_url = None if local_video_path else video_url
 
     try:
-        rendered_videos = []
-
         for i, clip in enumerate(clips):
-            # Find caption for this clip
-            caption_data = next((c for c in (captions or []) if c["clipIndex"] == i), None)
+            if str(i) in rendered:
+                logger.info(f"⏭️  Clip {i + 1}/{len(clips)} already rendered — skipping")
+                continue
+
+            caption_data = next((c for c in captions if c["clipIndex"] == i), None)
             caption_url = caption_data["captionUrl"] if caption_data else None
 
             logger.info(f"📹 Rendering clip {i + 1}/{len(clips)}{' with captions' if caption_url else ''}  start={clip['start']:.1f}s  end={clip['end']:.1f}s")
 
-            # Download caption file if provided
             local_caption_path = None
             if caption_url and "supabase" in caption_url:
-                # Extract storage path from Supabase URL
                 parts = caption_url.split("/storage/v1/object/public/")
                 if len(parts) == 2:
                     full_path = parts[1].split("?")[0]
                     path_parts = full_path.split("/", 1)
                     if len(path_parts) == 2:
-                        caption_storage_path = path_parts[1]
-                        local_caption_path = await download_from_supabase(caption_storage_path)
+                        local_caption_path = await download_from_supabase(path_parts[1])
                         logger.info(f"✅ Downloaded caption file to: {local_caption_path}")
 
-            # Render video
             result = await render_video(
-                video_url=video_url,
-                video_path=video_path,
+                video_url=render_video_url,
+                video_path=local_video_path,
                 start=clip["start"],
                 end=clip["end"],
-                subtitle_path=local_caption_path
+                subtitle_path=local_caption_path,
             )
-
             rendered_path = result["output_path"]
             duration = result["duration"]
 
-            # Upload to Supabase
             storage_path = f"sessions/{session_id}/clips/clip-{i}.mp4"
             public_url = upload_to_supabase(rendered_path, storage_path)
 
-            # Cleanup local files
             if local_caption_path and os.path.exists(local_caption_path):
                 os.remove(local_caption_path)
             if rendered_path and os.path.exists(rendered_path):
@@ -565,20 +457,17 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
                 url=public_url,
             )
 
-            rendered_videos.append({
-                "url": public_url,
-                "duration": float(duration),
-                "clip": clip
-            })
+            rendered[str(i)] = {"url": public_url, "duration": float(duration), "clip": clip}
+            # Persist after each clip so a crash mid-render doesn't lose already-uploaded ones
+            save_pipeline_state(session_id, pipeline_state, "render", 80 + int(20 * (i + 1) / len(clips)))
 
-        logger.info(f"🎉 All {len(rendered_videos)} clips rendered successfully!")
+        logger.info(f"🎉 All {len(clips)} clips rendered successfully!")
 
-        # Clean up the pre-downloaded YouTube video now that all clips are rendered
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
             logger.info(f"🗑️  Cleaned up downloaded video: {local_video_path}")
 
-        # Persist clip URLs and metadata
+        rendered_videos = [rendered[str(i)] for i in range(len(clips)) if str(i) in rendered]
         clip_paths = [rv["url"] for rv in rendered_videos]
         clips_metadata = [
             {
@@ -588,29 +477,58 @@ async def render_node(state: VideoProcessingState) -> Dict[str, Any]:
                 "score": rv["clip"].get("score", 0),
             }
             for rv in rendered_videos
-            if rv.get("clip")
         ]
-
-        if session_id:
-            complete_session(session_id, clip_paths, clips_metadata)
-
-        log_conversion_success(logger, "render_complete", clips=len(rendered_videos))
-
-        return {
-            "renderedVideos": rendered_videos,
-            "currentStage": "completed"
-        }
+        return clip_paths, clips_metadata
 
     except Exception as e:
         logger.exception("❌ Rendering failed")
-
         if local_video_path and os.path.exists(local_video_path):
             os.remove(local_video_path)
+        fail_session(session_id, str(e), "render")
+        raise _StageFailed(str(e)) from e
 
-        if session_id:
-            fail_session(session_id, str(e), "render")
 
-        return {
-            "errors": [str(e)],
-            "currentStage": "render"
-        }
+async def run_pipeline(session_id: str, video_url: str, existing_clips: List[ExistingClip]) -> None:
+    """
+    Run the full pipeline for a session: transcribe -> identify clips -> generate
+    captions -> render. Resumes from the first stage not already cached in
+    pipeline_state, so a retried job after a crash or transient failure doesn't
+    redo completed work.
+
+    Raises _StageFailed if a stage failed (it has already called fail_session() with a
+    specific error) or any other exception for a truly unexpected failure — callers
+    should treat both as "the job failed", the difference only matters for logging.
+    """
+    pipeline_state = get_pipeline_state(session_id)
+    local_video_path = None
+
+    if "transcript" in pipeline_state:
+        logger.info(f"⏭️  Session {session_id}: transcript already cached — skipping transcribe")
+        transcript = pipeline_state["transcript"]
+    else:
+        transcript, local_video_path = await _transcribe_stage(video_url, session_id)
+        pipeline_state["transcript"] = transcript
+        save_pipeline_state(session_id, pipeline_state, "identifyClips", 35)
+
+    if "clips" in pipeline_state:
+        logger.info(f"⏭️  Session {session_id}: clips already cached — skipping identify_clips")
+        clips = pipeline_state["clips"]
+    else:
+        clips, _model_name = await _identify_clips_stage(session_id, transcript, existing_clips)
+        pipeline_state["clips"] = clips
+        save_pipeline_state(session_id, pipeline_state, "generateCaptions", 60)
+
+    if "captions" in pipeline_state:
+        logger.info(f"⏭️  Session {session_id}: captions already cached — skipping generate_captions")
+        captions = pipeline_state["captions"]
+    else:
+        captions = await _generate_captions_stage(session_id, transcript["words"], clips)
+        pipeline_state["captions"] = captions
+        save_pipeline_state(session_id, pipeline_state, "render", 80)
+
+    clip_paths, clips_metadata = await _render_stage(
+        session_id, clips, captions, local_video_path, video_url, pipeline_state
+    )
+
+    complete_session(session_id, clip_paths, clips_metadata)
+    log_conversion_success(logger, "render_complete", clips=len(clip_paths))

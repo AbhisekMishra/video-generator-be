@@ -8,20 +8,21 @@ This list is what's left.
 
 - [ ] **Observability (Sentry/APM)** — logs are stdout-only, no error tracking. Needs a
       Sentry DSN (or equivalent) from the team before wiring anything up.
-- [ ] **Persistent LangGraph checkpointer** — the in-memory `MemorySaver` loses all
-      workflow state on restart/redeploy. `GET /process-video/status/{session_id}` now
-      falls back to the `sessions` table when the checkpoint is empty (good enough for
-      status *display*), but a job actually killed mid-restart still relies on the
-      15-minute stale-job recovery to self-heal, not a clean resume. Fixing this
-      properly means swapping to a Postgres-backed checkpointer
-      (`langgraph-checkpoint-postgres` or similar) — a real architecture change, not a
-      quick patch.
+- [x] ~~**Persistent LangGraph checkpointer**~~ — RESOLVED 2026-09-01, differently than
+      planned: rather than swapping to a Postgres-backed LangGraph checkpointer,
+      LangGraph was dropped entirely (see `CLAUDE.md`). `sessions.pipeline_state`
+      (new JSONB column) now caches each pipeline stage's real output, and a retried
+      job resumes from the first stage not already cached — including per-clip resume
+      in the render stage. This is durable (real Postgres, unlike the old in-memory
+      `MemorySaver`, which was wiped before every run anyway and never actually enabled
+      resuming).
 - [ ] **Crash/kill mid-job stuck window** — `JOB_STALE_TIMEOUT_MINUTES` (default 15 min)
       is how long a user sees "processing" with no feedback if the worker dies
       mid-render. Graceful shutdown (added) reduces how often this happens on a normal
-      deploy, but doesn't eliminate the window for a hard crash/OOM kill. Consider
-      lowering the timeout or surfacing a "this is taking longer than usual" UI state
-      after some threshold instead.
+      deploy, but doesn't eliminate the window for a hard crash/OOM kill. Now that a
+      recycled stale job resumes via `pipeline_state` instead of restarting from
+      scratch (see above), a shorter timeout is less costly than it used to be —
+      worth revisiting.
 
 ## Code quality / maintainability (P2 — safe to defer indefinitely)
 
@@ -30,9 +31,11 @@ This list is what's left.
       workaround that the *unused* `utils/youtube.py` already has. Either delete the
       dead file, or port the cookie support into the live implementation — right now
       the fix for a real reliability gap is sitting unused right next to the bug.
-- [ ] **Business logic duplicated 3+ places** — Supabase-URL-to-storage-path extraction
-      is copy-pasted in `main.py` (`/render` endpoint, twice) and `workflow/nodes.py`'s
-      `render_node`. Extract to a shared helper.
+- [x] ~~**Business logic duplicated 3+ places**~~ — RESOLVED as a side effect of the
+      2026-09-01 pipeline rewrite: the standalone `/render` endpoint (which had its own
+      copy of the Supabase-URL-to-storage-path extraction) was deleted entirely (zero
+      frontend callers). The only remaining copy is in `workflow/pipeline.py`'s
+      `_render_stage`.
 - [ ] **Repo clutter partially cleaned** — `SIMPLE_EXAMPLES.py` was removed. `PYTHON_GUIDE.md`
       and `README_BEGINNER.md` are still in the repo root and get copied into the Docker
       image (no `.dockerignore` exists). Low priority, but worth a `.dockerignore` at
@@ -43,8 +46,12 @@ This list is what's left.
       would make backends 1-4 dead weight and remove that whole code path.
 
 ## Also worth knowing
-- `requirements.txt` intentionally does NOT pin upper bounds on `langgraph`,
-  `langchain-anthropic`, `langchain-core` — the versions actually deployed in production
-  couldn't be verified from this environment (the local venv found here didn't even have
-  these installed). Before adding a ceiling, run `pip freeze` against the real deployment
-  and pin exact versions instead of guessing.
+- `langgraph`/`langchain-anthropic`/`langchain-core` are gone as of 2026-09-01 (see
+  `CLAUDE.md`) — `anthropic` is called directly now. The note that used to be here about
+  not pinning their upper bounds no longer applies.
+- `utils/youtube.py` has a `YOUTUBE_COOKIES`-based bot-detection workaround that was
+  never wired up — `utils/file_utils.py` (the one actually used) instead uses yt-dlp's
+  `player_client: [android, ios, web]` extractor args (added 2026-09-01), which fixed a
+  live "Sign in to confirm you're not a bot" failure without needing cookies. Given that,
+  `utils/youtube.py` is very likely just dead weight now — worth confirming and deleting
+  rather than porting its cookie support over.

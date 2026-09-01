@@ -106,26 +106,46 @@ def upload_to_supabase(local_file_path: str, storage_path: str) -> str:
         raise Exception(f"Failed to upload to Supabase: {str(e)}")
 
 
-def update_session_model(thread_id: str, model_name: str) -> None:
-    """Update model_used on the sessions row identified by thread_id."""
+def update_session_model(session_id: str, model_name: str) -> None:
+    """Update model_used on the sessions row identified by id."""
     try:
-        supabase.table("sessions").update({"model_used": model_name}).eq("thread_id", thread_id).execute()
-        logger.info(f"✅ Session {thread_id}: model_used={model_name}")
+        supabase.table("sessions").update({"model_used": model_name}).eq("id", session_id).execute()
+        logger.info(f"✅ Session {session_id}: model_used={model_name}")
     except Exception as e:
         logger.warning(f"⚠️  Failed to update session model: {e}")
 
 
-def update_session_status(thread_id: str, status: str, completed: bool = False) -> None:
-    """Update status (and optionally completed_at) on the sessions row identified by thread_id."""
+def get_pipeline_state(session_id: str) -> dict:
+    """
+    Read cached per-stage pipeline output (transcript/clips/captions/rendered) for a
+    session, so a retried job can skip stages it already completed instead of redoing
+    expensive work (Whisper, an LLM call, FFmpeg renders) from scratch.
+    """
     try:
-        data = {"status": status}
-        if completed:
-            from datetime import datetime, timezone
-            data["completed_at"] = datetime.now(timezone.utc).isoformat()
-        supabase.table("sessions").update(data).eq("thread_id", thread_id).execute()
-        logger.info(f"✅ Session {thread_id}: status={status}")
+        result = (
+            supabase.table("sessions")
+            .select("pipeline_state")
+            .eq("id", session_id)
+            .maybe_single()
+            .execute()
+        )
+        return (result.data or {}).get("pipeline_state") or {}
     except Exception as e:
-        logger.warning(f"⚠️  Failed to update session status: {e}")
+        logger.warning(f"⚠️  Failed to load pipeline_state for session {session_id}: {e}")
+        return {}
+
+
+def save_pipeline_state(session_id: str, pipeline_state: dict, current_stage: str, progress: int) -> None:
+    """Persist the pipeline's stage cache and advance current_stage/progress for the UI."""
+    try:
+        supabase.table("sessions").update({
+            "pipeline_state": pipeline_state,
+            "current_stage": current_stage,
+            "progress": progress,
+        }).eq("id", session_id).execute()
+        logger.info(f"✅ Session {session_id}: stage={current_stage} progress={progress}%")
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to save pipeline_state for session {session_id}: {e}")
 
 
 def fail_session(session_id: str, error_message: str, error_stage: str) -> None:

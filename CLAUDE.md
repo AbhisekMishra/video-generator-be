@@ -23,7 +23,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
-CI (`.github/workflows/ci.yml`) runs this plus a full `py_compile` syntax check on every push/PR. Tests only cover pure validation/parsing logic (`utils/validation.py`, `utils/file_utils.py`) — nothing exercises the queue worker, LangGraph nodes, or FFmpeg/Whisper pipeline end-to-end yet.
+CI (`.github/workflows/ci.yml`) runs this plus a full `py_compile` syntax check on every push/PR. Tests only cover pure validation/parsing logic (`utils/validation.py`, `utils/file_utils.py`) — nothing exercises the queue worker or the FFmpeg/Whisper/Claude pipeline end-to-end yet.
 
 ### Prerequisites
 - Python 3.9+
@@ -36,7 +36,7 @@ Required in `.env`:
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_STORAGE_BUCKET=video-storage
-ANTHROPIC_API_KEY=               # API key for Claude (used by identify_clips_node)
+ANTHROPIC_API_KEY=               # API key for Claude (used by _identify_clips_stage in workflow/pipeline.py)
 INTERNAL_API_KEY=                # Shared secret required on every request (X-Internal-Api-Key header). Must match FASTAPI_INTERNAL_API_KEY on the frontend. Required — the app fails to start without it.
 MAX_VIDEO_DURATION_SECONDS=1800  # Default: 30 minutes
 MAX_CONCURRENT_JOBS=2
@@ -48,30 +48,33 @@ JOB_STALE_TIMEOUT_MINUTES=15
 
 ### Request Flow
 
-1. **`POST /process-video`** — Enqueues a job (returns 202). The background worker picks it up and runs the LangGraph workflow asynchronously.
-2. **`GET /process-video/status/{session_id}`** — Polls LangGraph checkpointer state (in-memory `MemorySaver`).
-3. **`GET /process-video/queue-position/{session_id}`** — Polls `job_queue` table in Supabase.
+1. **`POST /process-video`** — Enqueues a job (returns 202). The background worker picks it up and runs the pipeline asynchronously.
+2. **`GET /process-video/queue-position/{session_id}`** — Polls `job_queue` table in Supabase.
+3. **`POST /validate-youtube`** — Checks a YouTube video's duration before a session is created.
 
-There are also standalone direct endpoints (`/transcribe`, `/render`, `/generate-captions`, `/validate-youtube`) used independently by the frontend for manual operations.
+That's the entire API surface (plus `/health` and `/`). There used to be standalone `/transcribe`, `/render`, `/generate-captions`, and `/process-video/status/{id}` endpoints — they were deleted (2026-09) because nothing called them; the frontend only ever used the three routes above.
 
-### LangGraph Workflow (`workflow/`)
+### Pipeline (`workflow/pipeline.py`)
 
-Linear pipeline with 4 nodes — no conditional edges; errors are stored in state rather than raised:
+Plain sequential async pipeline — no framework, no state-merging, just `await` and real `try/except`:
 
 ```
-transcribe -> identifyClips -> generateCaptions -> render -> END
+_transcribe_stage -> _identify_clips_stage -> _generate_captions_stage -> _render_stage
 ```
 
-- **`transcribe_node`**: Downloads YouTube video (once, stores `localVideoPath` in state for reuse), extracts audio with FFmpeg, transcribes with faster-whisper.
-- **`identify_clips_node`**: Sends transcript to Claude (`claude-haiku-4-5-20251001` via Anthropic API) to select 3 best clips (30–75s each). Retries up to 3 times on timeout, error, or unparseable/invalid JSON output.
-- **`generate_captions_node`**: Creates ASS subtitle files per clip, uploads to Supabase.
-- **`render_node`**: Trims video with FFmpeg, burns in subtitles, uploads clips to Supabase, calls `complete_session()`.
+`run_pipeline(session_id, video_url, existing_clips)` is the entry point, called from `utils/queue_manager.py`. Each stage:
+- **`_transcribe_stage`**: Downloads YouTube video (once, returns `local_video_path` for the render stage to reuse), extracts audio with FFmpeg, transcribes with faster-whisper.
+- **`_identify_clips_stage`**: Sends the transcript to Claude (`claude-haiku-4-5-20251001` via the `anthropic` SDK directly) to select 3 best clips (30–75s each, snapped to end on a complete sentence via `_snap_to_sentence_end`). Retries up to 3 times on timeout, error, or unparseable/invalid JSON.
+- **`_generate_captions_stage`**: Creates ASS subtitle files per clip, uploads to Supabase.
+- **`_render_stage`**: Trims each clip with FFmpeg, burns in subtitles, uploads to Supabase.
 
-State is defined in `workflow/state.py` as `VideoProcessingState` (TypedDict). Nodes return partial dicts that LangGraph merges into state.
+**A stage that fails calls `fail_session()` with the real error and stage name, then raises `_StageFailed`** — the pipeline stops immediately at the first failure. This replaced an earlier LangGraph-based version whose linear-graph-with-no-conditional-edges design meant every stage ran regardless of upstream failure, and the *last* stage's generic error silently overwrote whatever specific error an earlier stage had already recorded (e.g. a YouTube download failure would surface to the user as "No clips available" from the render stage). Domain types (`Transcript`, `Clip`, `CaptionData`, etc.) live in `workflow/state.py`.
+
+**Resumability**: each stage's output is cached in the session's `pipeline_state` (JSONB column) as it completes — `get_pipeline_state()`/`save_pipeline_state()` in `utils/supabase_client.py`. A retried job checks this cache before redoing a stage, so a crash after transcription (the expensive Whisper step) doesn't force a full redo. The render stage goes further: it caches each *individual* rendered clip's URL, so a crash partway through rendering only re-renders the clips that didn't finish. This is real, durable resumability — unlike the LangGraph version it replaced, whose in-memory `MemorySaver` checkpoint was explicitly wiped before every run anyway and never actually enabled resuming.
 
 ### Queue Manager (`utils/queue_manager.py`)
 
-Uses Supabase `job_queue` table as persistent queue backend. A single asyncio background task (`_worker_loop`) polls every `WORKER_POLL_INTERVAL` seconds, claims jobs with optimistic locking, and dispatches up to `MAX_CONCURRENT_JOBS` concurrent workflow invocations. Stale `processing` jobs are automatically recycled after `JOB_STALE_TIMEOUT_MINUTES`.
+Uses Supabase `job_queue` table as persistent queue backend. A single asyncio background task (`_worker_loop`) polls every `WORKER_POLL_INTERVAL` seconds, claims jobs with optimistic locking, and dispatches up to `MAX_CONCURRENT_JOBS` concurrent pipeline runs. Stale `processing` jobs are automatically recycled after `JOB_STALE_TIMEOUT_MINUTES`. `_process_job()` catches `_StageFailed` (a stage already recorded the real error) separately from any other exception (a true crash, for which it writes a generic fallback error to the session as a safety net).
 
 ### Supabase Storage Layout
 
@@ -90,15 +93,15 @@ Session status is tracked in the `sessions` table; `fail_session()` / `complete_
 | File | Purpose |
 |------|---------|
 | `main.py` | FastAPI app, all route definitions, lifespan startup/shutdown |
-| `schemas.py` | Shared Pydantic models (single source of truth for API + workflow) |
-| `workflow/graph.py` | LangGraph graph definition; singleton `_graph_instance` with `MemorySaver` |
-| `workflow/nodes.py` | All 4 pipeline node implementations |
-| `workflow/state.py` | `VideoProcessingState` TypedDict |
+| `workflow/pipeline.py` | The 4 pipeline stages + `run_pipeline()` orchestrator + `_StageFailed` |
+| `workflow/state.py` | Domain TypedDicts (`Transcript`, `Clip`, `CaptionData`, `RenderedVideo`, `ExistingClip`) |
+| `utils/queue_manager.py` | Job queue worker loop; calls `run_pipeline()` per claimed job |
+| `utils/supabase_client.py` | All `sessions` table writes, incl. `pipeline_state` cache read/write |
 | `tasks/transcribe.py` | Whisper model (lazy singleton), FFmpeg audio extraction |
 | `tasks/render.py` | FFmpeg video trimming + subtitle burning |
 | `utils/caption_generator.py` | ASS subtitle file generation |
-| `utils/quota.py` | Session ownership verification |
+| `utils/quota.py` | Session ownership verification (quota enforcement itself lives in the frontend) |
 
 ### Windows-specific
 
-`main.py` sets `asyncio.WindowsSelectorEventLoopPolicy` before any async imports — this is required for psycopg/langgraph compatibility. `uvicorn` is launched with `loop="none"` in `__main__`.
+`main.py` sets `asyncio.WindowsSelectorEventLoopPolicy` before any async imports — this is required for psycopg (used indirectly by the `supabase` client) compatibility. `uvicorn` is launched with `loop="none"` in `__main__`.

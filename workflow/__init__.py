@@ -1,8 +1,9 @@
 """
-Video Processing Workflow Package
+Video Processing Pipeline Package
 
-This package contains the LangGraph workflow implementation for video processing,
-including state definitions, graph structure, and individual processing nodes.
+Contains the domain type definitions (workflow/state.py) and the sequential
+pipeline (workflow/pipeline.py): transcribe -> identify clips -> generate
+captions -> render.
 """
 
 from workflow.state import (
@@ -11,7 +12,7 @@ from workflow.state import (
     Clip,
     CaptionData,
     RenderedVideo,
-    VideoProcessingState,
+    ExistingClip,
 )
 
 __all__ = [
@@ -20,5 +21,5 @@ __all__ = [
     "Clip",
     "CaptionData",
     "RenderedVideo",
-    "VideoProcessingState",
+    "ExistingClip",
 ]
