@@ -260,8 +260,7 @@ async def render_video(
       ├──────────────────────────┤
       │                          │
       │  video content (original resolution, no resize)
-      │  1. bullet               │
-      │  …                       │
+      │                          │
       │      [word captions]     │
       ├──────────────────────────┤
       │                          │  ← bottom gap (~5.5 % of source height)
@@ -270,7 +269,7 @@ async def render_video(
     Output width  = source width  (unchanged)
     Output height = source height + top_gap + bottom_gap
 
-    The title + bullet points + word captions are burned via the ASS file.
+    The title + word captions are burned via the ASS file.
     The logo is overlaid by FFmpeg using a second input (cairosvg or svglib).
 
     Args:
@@ -348,7 +347,7 @@ async def render_video(
             extra_inputs += ["-i", logo_png_path]
             next_input_idx += 1
 
-        # Step C: burn ASS subtitles (title + bullets + word captions)
+        # Step C: burn ASS subtitles (title + word captions)
         if subtitle_path and os.path.exists(subtitle_path):
             logger.info(f"🔍 Subtitle path: {subtitle_path}")
             # Windows: forward slashes + escape colon in drive letter

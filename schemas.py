@@ -27,7 +27,6 @@ class ClipSchema(BaseModel):
     reason: str
     hook: Optional[str] = None
     title: Optional[str] = None
-    points: Optional[List[str]] = None
 
 
 class CaptionDataSchema(BaseModel):

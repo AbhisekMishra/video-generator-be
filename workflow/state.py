@@ -23,7 +23,6 @@ class Clip(TypedDict):
     reason: str
     hook: Optional[str]
     title: Optional[str]       # Header text shown at top of video
-    points: Optional[List[str]]  # 5 single words from transcript; timestamps resolved at render time
 
 
 class CaptionData(TypedDict):

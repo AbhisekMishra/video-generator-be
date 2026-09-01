@@ -26,6 +26,26 @@ from tasks.render import render_video
 
 CLIPS_MODEL = "claude-haiku-4-5-20251001"
 
+_SENTENCE_ENDERS = (".", "!", "?")
+
+
+def _snap_to_sentence_end(end_time: float, words: list, max_extend: float = 10.0) -> float:
+    """
+    Extend end_time forward to the end of the nearest sentence-ending word (., !, or ?)
+    so a clip closes its thought instead of cutting off mid-dialogue. Only searches
+    forward within max_extend seconds; leaves end_time unchanged if no sentence
+    boundary is found in that window.
+    """
+    for word in words:
+        w_end = word.get("end", 0.0)
+        if w_end < end_time:
+            continue
+        if w_end - end_time > max_extend:
+            break
+        if str(word.get("word", "")).strip().endswith(_SENTENCE_ENDERS):
+            return w_end
+    return end_time
+
 
 async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
     """
@@ -229,27 +249,18 @@ CRITICAL RULES:
 - Speech in this video begins at {first_word_at:.1f}s. Do NOT start any clip before {first_word_at:.1f}s.
 - Every clip MUST start and end where someone is actively speaking. NEVER clip into music, silence, or intro sequences.
 - Each clip MUST contain dense, continuous dialogue from start to end — no long pauses or music sections inside the clip.
+- ENDING: The clip MUST end at the completion of a full sentence, joke, or thought — never cut off mid-word, mid-sentence, or mid-punchline. Choose the end timestamp right after the speaker (or the person responding to them) finishes that point, even if it means running a few seconds longer than the target duration. A clip that ends abruptly, with the conversation still open, is a failure.
 - DURATION: Each clip MUST be between 30 and 60 seconds. Aim for 45 seconds. NEVER exceed 75 seconds.
-  - If a good moment is longer than 60 seconds, pick only the best 45-second portion of it.
+  - If a good moment is longer than 60 seconds, pick only the best 45-second portion of it — but still end that portion on a completed thought, not an arbitrary cutoff.
   - Double-check: (end - start) must be between 30 and 60 for every clip.
 
 For each clip provide:
 - start: timestamp in seconds (must be >= {first_word_at:.1f})
-- end: timestamp in seconds (must be <= {last_word_at:.1f})
+- end: timestamp in seconds (must be <= {last_word_at:.1f}), landing exactly where the thought/sentence completes
 - score: engagement score (0-100)
 - reason: why this clip is engaging
 - hook: the catchy opening line or topic
 - title: a short catchy header (3-5 words) shown at the top of the video
-- points: exactly 5 single HIGH-IMPACT words from this clip's spoken dialogue. These appear as numbered bullets on screen — they must make a viewer stop scrolling.
-  Rules for points:
-  * Every word MUST actually be spoken in this clip
-  * ABSOLUTE BAN — never use these: "and", "the", "a", "an", "so", "then", "just", "like", "okay", "yeah", "yes", "no", "is", "it", "in", "on", "at", "to", "or", "but", "we", "i", "you", "he", "she", "they", "um", "uh", "got", "get", "gonna", "well", "now", "here", "there", "very", "really", "actually", "basically", "literally", "things", "something", "anything", "everything", "people", "person", "time", "way", "make", "made", "said", "says", "want", "wanted", "need", "know", "think", "thought", "feel", "felt", "went", "come", "came", "look", "looked", "right", "good", "great", "bad", "big", "new", "old", "first", "last", "one", "two", "three", "also", "even", "still", "back", "over", "about", "because", "when", "what", "that", "this", "these", "those"
-  * PREFER words that are: shocking, counterintuitive, emotionally charged, highly specific, or reveal something unexpected
-  * STRONG word types: concrete nouns (a specific person/place/thing), vivid action verbs, stark adjectives with strong connotation
-  * ASK YOURSELF: "If someone saw only this word on screen, would it make them curious or emotional?" — only use it if the answer is YES
-  * The 5 words together should feel like a teaser that hints at the clip's core revelation or emotion
-  * BAD example: ["make", "things", "really", "good", "time"] — generic, forgettable
-  * GOOD example: ["betrayed", "collapsed", "millions", "exposed", "survived"] — specific, visceral, curiosity-inducing
 
 Return your response as a JSON array of clips. Example:
 [
@@ -259,8 +270,7 @@ Return your response as a JSON array of clips. Example:
     "score": 95,
     "reason": "Strong emotional hook with clear value proposition",
     "hook": "Here's the secret that changed everything",
-    "title": "The secret nobody tells you",
-    "points": ["secret", "broke", "discovered", "finally", "works"]
+    "title": "The secret nobody tells you"
   }}
 ]
 
@@ -321,13 +331,15 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
             if duration < 20:
                 logger.warning(f"  ⚠️  Skipping clip {raw_start:.1f}–{raw_end:.1f}s: too short ({duration:.0f}s)")
                 continue
-            # Trim clips longer than 75s — keep from start, cap the end
-            if duration > 75:
-                logger.warning(f"  ⚠️  Trimming clip {raw_start:.1f}–{raw_end:.1f}s ({duration:.0f}s) → 60s")
-                raw_end = raw_start + 60.0
 
-            raw_points = clip.get("points") or []
-            normalized_points = [str(p) for p in raw_points if str(p).strip()]
+            # Extend to the next sentence-ending word so the clip closes its thought
+            # instead of cutting off mid-dialogue — still capped at 75s total.
+            snapped_end = _snap_to_sentence_end(raw_end, words, max_extend=10.0)
+            if snapped_end > raw_start + 75.0:
+                logger.warning(f"  ⚠️  Sentence end for clip at {raw_start:.1f}s was past the 75s cap — capping there instead")
+                snapped_end = raw_start + 75.0
+            raw_end = snapped_end
+
             normalized_clips.append({
                 "start": raw_start,
                 "end":   raw_end,
@@ -335,7 +347,6 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
                 "reason": str(clip["reason"]),
                 "hook": str(clip.get("hook", "")) if clip.get("hook") else None,
                 "title": str(clip["title"]) if clip.get("title") else None,
-                "points": normalized_points
             })
 
         # Post-validation: drop clips that overlap existing clips by more than 5s
@@ -419,19 +430,15 @@ async def generate_captions_node(state: VideoProcessingState) -> Dict[str, Any]:
         captions = []
 
         for i, clip in enumerate(clips):
-            logger.info(f"📝 Generating captions for clip {i + 1}/{len(clips)}...")
+            logger.info(f"📝 Generating captions for clip {i + 1}/{len(clips)}...  title='{clip.get('title')}'")
 
-            bullet_words = clip.get("points") or []
-            logger.info(f"🔤 Clip {i + 1} title='{clip.get('title')}'  bullet_words={bullet_words}")
-
-            # Generate ASS file (includes header, bullet points, and word captions)
+            # Generate ASS file (includes header and word captions)
             ass_file_path = create_ass_file_for_clip(
                 words=transcript["words"],
                 clip_start=clip["start"],
                 clip_end=clip["end"],
                 style="highlight",
                 title=clip.get("title"),
-                bullet_words=bullet_words,
             )
 
             if not ass_file_path:
