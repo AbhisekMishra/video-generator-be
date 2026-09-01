@@ -38,8 +38,8 @@ SUPABASE_URL=https://yourproject.supabase.co
 SUPABASE_KEY=your-anon-key
 SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
 
-# AI Model (GitHub Models - free!)
-GITHUB_TOKEN=your-github-token
+# AI Model (Claude)
+ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
 ### 3. Run the Server
@@ -62,7 +62,7 @@ Visit `http://localhost:8000/docs` for interactive API documentation (Swagger UI
 ```
 1. User uploads video → Supabase Storage
 2. Backend transcribes video → Whisper AI (speech-to-text)
-3. AI finds best clips → GPT-4o-mini analyzes transcript
+3. AI finds best clips → Claude Haiku analyzes transcript
 4. Generate subtitles → Word-by-word animated captions
 5. Render videos → FFmpeg burns captions into clips
 6. Upload results → Supabase Storage

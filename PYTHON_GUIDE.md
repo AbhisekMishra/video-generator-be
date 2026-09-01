@@ -345,7 +345,7 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 
 **Workflow stages:**
 1. `transcribe` - Extract audio + generate transcript
-2. `identifyClips` - AI finds best clips (GPT-4)
+2. `identifyClips` - AI finds best clips (Claude Haiku)
 3. `generateCaptions` - Create word-by-word subtitles
 4. `render` - Render videos with burned-in captions
 

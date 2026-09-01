@@ -5,12 +5,13 @@ Each node represents a stage in the video processing pipeline.
 Nodes receive the current state and return updates to merge into the state.
 """
 
+import asyncio
 import json
 import os
 import re
 import traceback
 from typing import Dict, Any
-from langchain_openai import ChatOpenAI
+from langchain_anthropic import ChatAnthropic
 
 from utils.logger import get_logger, log_conversion_success
 logger = get_logger(__name__)
@@ -20,9 +21,10 @@ from tasks.transcribe import transcribe_video
 from utils.file_utils import is_youtube_url, download_youtube_video
 from utils.caption_generator import create_ass_file_for_clip
 from utils.supabase_client import upload_to_supabase, download_from_supabase
-from utils.model_selector import select_model, exhaust_model, ModelQuotaExhaustedError
 from utils.supabase_client import update_session_model, complete_session, fail_session
 from tasks.render import render_video
+
+CLIPS_MODEL = "claude-haiku-4-5-20251001"
 
 
 async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
@@ -131,7 +133,7 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 
 async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
     """
-    Node 2: Identify best clips using AI (GPT-4o-mini).
+    Node 2: Identify best clips using AI (Claude Haiku).
 
     This node uses a Large Language Model (LLM) to analyze the transcript
     and identify the 3 most engaging clips for short-form content.
@@ -156,10 +158,6 @@ async def identify_clips_node(state: VideoProcessingState) -> Dict[str, Any]:
         }
 
     try:
-        # Import here to avoid circular import (graph -> nodes -> graph)
-        from workflow.graph import get_pool
-
-        pool = await get_pool()
         session_id = state.get("sessionId")
 
         # Detect where speech actually starts so we don't pick music-only sections
@@ -262,133 +260,111 @@ Return your response as a JSON array of clips. Example:
 
 IMPORTANT: Return ONLY the JSON array, no additional text."""
 
-        # Retry loop: if the selected model returns unknown_model, exhaust it and try the next one
-        import asyncio
-        from openai import BadRequestError
+        model_name = CLIPS_MODEL
+        llm = ChatAnthropic(
+            model=model_name,
+            temperature=0.7,
+            api_key=os.getenv("ANTHROPIC_API_KEY"),
+        )
 
-        excluded_models: set[str] = set()
+        MAX_ATTEMPTS = 3
+        content = None
 
-        for attempt in range(len(excluded_models) + 10):  # generous upper bound
-            try:
-                model_name = await select_model(pool, excluded=excluded_models)
-            except ModelQuotaExhaustedError:
-                raise
-
-            logger.info(f"🧠 Using model: {model_name} (attempt {attempt + 1})")
-
-            llm = ChatOpenAI(
-                model=model_name,
-                temperature=0.7,
-                base_url="https://models.inference.ai.azure.com",
-                api_key=os.getenv("GITHUB_TOKEN")
-            )
-
-            logger.info(f"📡 Calling LLM ({model_name})...")
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            logger.info(f"📡 Calling LLM ({model_name}, attempt {attempt}/{MAX_ATTEMPTS})...")
             try:
                 response = await asyncio.wait_for(llm.ainvoke(prompt), timeout=60)
                 content = str(response.content)
             except asyncio.TimeoutError:
-                logger.warning(f"⏱️ {model_name} timed out — trying next model")
-                excluded_models.add(model_name)
+                logger.warning(f"⏱️ {model_name} timed out (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
+                content = None
                 continue
-            except BadRequestError as e:
-                err_body = getattr(e, "body", {}) or {}
-                if err_body.get("code") == "unknown_model" or "unknown_model" in str(e):
-                    logger.warning(f"⚠️ Model '{model_name}' rejected as unknown — exhausting and retrying...")
-                    await exhaust_model(pool, model_name)
-                    excluded_models.add(model_name)
-                    continue
-                raise
             except Exception as e:
-                logger.warning(f"⚠️ {model_name} unexpected error: {e} — trying next model")
-                excluded_models.add(model_name)
+                logger.warning(f"⚠️ {model_name} error (attempt {attempt}/{MAX_ATTEMPTS}): {e} — retrying")
+                content = None
                 continue
 
             logger.info(f"🤖 LLM raw response ({model_name}):\n{content}\n{'=' * 80}")
 
-            # Parse JSON — if unparseable, try next model
+            # Parse JSON — if unparseable, retry
             json_match = re.search(r'\[[\s\S]*\]', content)
             if not json_match:
-                logger.warning(f"⚠️ {model_name} returned unparseable response — trying next model")
-                excluded_models.add(model_name)
+                logger.warning(f"⚠️ {model_name} returned unparseable response (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
+                content = None
                 continue
 
             try:
                 clips = json.loads(json_match.group(0))
+                break
             except json.JSONDecodeError:
-                logger.warning(f"⚠️ {model_name} returned invalid JSON — trying next model")
-                excluded_models.add(model_name)
+                logger.warning(f"⚠️ {model_name} returned invalid JSON (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
+                content = None
                 continue
 
-            normalized_clips = []
-            for clip in clips:
-                raw_start = float(clip["start"])
-                raw_end   = float(clip["end"])
-                duration  = raw_end - raw_start
+        if content is None:
+            raise RuntimeError(f"{model_name} failed to produce a valid response after {MAX_ATTEMPTS} attempts")
 
-                # ── Hard duration enforcement ───────────────────────────────
-                # Reject clips shorter than 20s (not enough content)
-                if duration < 20:
-                    logger.warning(f"  ⚠️  Skipping clip {raw_start:.1f}–{raw_end:.1f}s: too short ({duration:.0f}s)")
-                    continue
-                # Trim clips longer than 75s — keep from start, cap the end
-                if duration > 75:
-                    logger.warning(f"  ⚠️  Trimming clip {raw_start:.1f}–{raw_end:.1f}s ({duration:.0f}s) → 60s")
-                    raw_end = raw_start + 60.0
+        normalized_clips = []
+        for clip in clips:
+            raw_start = float(clip["start"])
+            raw_end   = float(clip["end"])
+            duration  = raw_end - raw_start
 
-                raw_points = clip.get("points") or []
-                normalized_points = [str(p) for p in raw_points if str(p).strip()]
-                normalized_clips.append({
-                    "start": raw_start,
-                    "end":   raw_end,
-                    "score": int(clip["score"]),
-                    "reason": str(clip["reason"]),
-                    "hook": str(clip.get("hook", "")) if clip.get("hook") else None,
-                    "title": str(clip["title"]) if clip.get("title") else None,
-                    "points": normalized_points
-                })
+            # ── Hard duration enforcement ───────────────────────────────
+            # Reject clips shorter than 20s (not enough content)
+            if duration < 20:
+                logger.warning(f"  ⚠️  Skipping clip {raw_start:.1f}–{raw_end:.1f}s: too short ({duration:.0f}s)")
+                continue
+            # Trim clips longer than 75s — keep from start, cap the end
+            if duration > 75:
+                logger.warning(f"  ⚠️  Trimming clip {raw_start:.1f}–{raw_end:.1f}s ({duration:.0f}s) → 60s")
+                raw_end = raw_start + 60.0
 
-            # Post-validation: drop clips that overlap existing clips by more than 5s
-            if existing_clips:
-                filtered = []
-                for nc in normalized_clips:
-                    overlapping = False
-                    for ec in existing_clips:
-                        overlap = min(nc["end"], ec["end"]) - max(nc["start"], ec["start"])
-                        if overlap > 5:
-                            logger.warning(f"  ⚠️  Dropping clip {nc['start']:.1f}–{nc['end']:.1f}s: overlaps existing clip {ec['start']:.1f}–{ec['end']:.1f}s by {overlap:.0f}s")
-                            overlapping = True
-                            break
-                    if not overlapping:
-                        filtered.append(nc)
-                normalized_clips = filtered
+            raw_points = clip.get("points") or []
+            normalized_points = [str(p) for p in raw_points if str(p).strip()]
+            normalized_clips.append({
+                "start": raw_start,
+                "end":   raw_end,
+                "score": int(clip["score"]),
+                "reason": str(clip["reason"]),
+                "hook": str(clip.get("hook", "")) if clip.get("hook") else None,
+                "title": str(clip["title"]) if clip.get("title") else None,
+                "points": normalized_points
+            })
 
-            logger.info(f"✅ Parsed Clips (after duration enforcement):\n{json.dumps(normalized_clips, indent=2)}")
+        # Post-validation: drop clips that overlap existing clips by more than 5s
+        if existing_clips:
+            filtered = []
+            for nc in normalized_clips:
+                overlapping = False
+                for ec in existing_clips:
+                    overlap = min(nc["end"], ec["end"]) - max(nc["start"], ec["start"])
+                    if overlap > 5:
+                        logger.warning(f"  ⚠️  Dropping clip {nc['start']:.1f}–{nc['end']:.1f}s: overlaps existing clip {ec['start']:.1f}–{ec['end']:.1f}s by {overlap:.0f}s")
+                        overlapping = True
+                        break
+                if not overlapping:
+                    filtered.append(nc)
+            normalized_clips = filtered
 
-            if session_id:
-                update_session_model(session_id, model_name)
+        logger.info(f"✅ Parsed Clips (after duration enforcement):\n{json.dumps(normalized_clips, indent=2)}")
 
-            log_conversion_success(
-                logger, "identify_clips",
-                clips=len(normalized_clips),
-                model=model_name,
-            )
+        if session_id:
+            update_session_model(session_id, model_name)
 
-            return {
-                "clips": normalized_clips,
-                "currentStage": "generateCaptions",
-                "llmRawResponse": content,
-                "selectedModel": model_name
-            }
+        log_conversion_success(
+            logger, "identify_clips",
+            clips=len(normalized_clips),
+            model=model_name,
+        )
 
-        raise RuntimeError("All available models failed to produce a valid response")
-
-    except ModelQuotaExhaustedError as e:
-        logger.error(f"🚫 All model quotas exhausted: {e}")
         return {
-            "errors": [str(e)],
-            "currentStage": "identifyClips"
+            "clips": normalized_clips,
+            "currentStage": "generateCaptions",
+            "llmRawResponse": content,
+            "selectedModel": model_name
         }
+
     except Exception as e:
         logger.exception("❌ Clip identification failed")
         return {

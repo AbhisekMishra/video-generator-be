@@ -25,7 +25,7 @@ yt-dlp>=2024.1.0
 
 # LangGraph for workflow orchestration
 langgraph>=0.2.59
-langchain-openai>=0.2.14
+langchain-anthropic>=0.3.0
 langchain-core>=0.3.28
 
 # Logo overlay: Pillow renders the AM logo geometry in pure Python (no native libs needed)

@@ -29,8 +29,7 @@ Required in `.env`:
 SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_STORAGE_BUCKET=video-storage
-GITHUB_TOKEN=                    # Used as API key for GitHub Models inference endpoint
-OPENAI_API_KEY=                  # May be needed by LangChain
+ANTHROPIC_API_KEY=               # API key for Claude (used by identify_clips_node)
 MAX_VIDEO_DURATION_SECONDS=1800  # Default: 30 minutes
 MAX_CONCURRENT_JOBS=2
 WORKER_POLL_INTERVAL=3
@@ -56,7 +55,7 @@ transcribe -> identifyClips -> generateCaptions -> render -> END
 ```
 
 - **`transcribe_node`**: Downloads YouTube video (once, stores `localVideoPath` in state for reuse), extracts audio with FFmpeg, transcribes with faster-whisper.
-- **`identify_clips_node`**: Sends transcript to an LLM (GitHub Models API via `https://models.inference.ai.azure.com`) to select 3 best clips (30–75s each). Uses tiered model rotation (`utils/model_selector.py`) with in-memory quota tracking.
+- **`identify_clips_node`**: Sends transcript to Claude (`claude-haiku-4-5-20251001` via Anthropic API) to select 3 best clips (30–75s each). Retries up to 3 times on timeout, error, or unparseable/invalid JSON output.
 - **`generate_captions_node`**: Creates ASS subtitle files per clip, uploads to Supabase.
 - **`render_node`**: Trims video with FFmpeg, burns in subtitles, uploads clips to Supabase, calls `complete_session()`.
 
@@ -65,10 +64,6 @@ State is defined in `workflow/state.py` as `VideoProcessingState` (TypedDict). N
 ### Queue Manager (`utils/queue_manager.py`)
 
 Uses Supabase `job_queue` table as persistent queue backend. A single asyncio background task (`_worker_loop`) polls every `WORKER_POLL_INTERVAL` seconds, claims jobs with optimistic locking, and dispatches up to `MAX_CONCURRENT_JOBS` concurrent workflow invocations. Stale `processing` jobs are automatically recycled after `JOB_STALE_TIMEOUT_MINUTES`.
-
-### Model Selection (`utils/model_selector.py` + `utils/model_registry.py`)
-
-Models are tiered: `low -> high -> special`. Selection picks the least-used available model respecting per-minute (RPM) and per-day (RPD) limits. Windows reset lazily on each read. If a model returns an `unknown_model` error, it is exhausted via `exhaust_model()` and the next is tried.
 
 ### Supabase Storage Layout
 
@@ -94,7 +89,6 @@ Session status is tracked in the `sessions` table; `fail_session()` / `complete_
 | `tasks/transcribe.py` | Whisper model (lazy singleton), FFmpeg audio extraction |
 | `tasks/render.py` | FFmpeg video trimming + subtitle burning |
 | `utils/caption_generator.py` | ASS subtitle file generation |
-| `utils/model_registry.py` | Static list of GitHub Models with tier/RPM/RPD limits |
 | `utils/quota.py` | Session ownership verification |
 
 ### Windows-specific

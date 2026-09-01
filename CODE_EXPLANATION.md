@@ -10,7 +10,7 @@ A beginner-friendly guide to understanding how this Python backend works.
 
 1. **Upload Video** → Frontend sends video to Supabase
 2. **Transcribe** → Backend extracts audio and converts speech to text (Whisper AI)
-3. **Identify Clips** → AI analyzes transcript and finds 3 best short-form clips (GPT-4)
+3. **Identify Clips** → AI analyzes transcript and finds 3 best short-form clips (Claude Haiku)
 4. **Generate Captions** → Creates word-by-word animated subtitles (ASS format)
 5. **Render Videos** → Burns subtitles into video clips (FFmpeg)
 6. **Upload Results** → Saves final videos to Supabase
@@ -59,7 +59,7 @@ A beginner-friendly guide to understanding how this Python backend works.
 │                     External Services                            │
 │  - PostgreSQL (State persistence)                                │
 │  - Supabase Storage (Video files)                                │
-│  - GitHub Models (AI - GPT-4o-mini)                              │
+│  - Anthropic (AI - Claude Haiku)                                 │
 │  - FFmpeg (Video processing)                                     │
 │  - Whisper AI (Transcription)                                    │
 └─────────────────────────────────────────────────────────────────┘
@@ -228,7 +228,7 @@ async def transcribe_node(state: VideoProcessingState) -> Dict[str, Any]:
 **The 4 workflow nodes:**
 
 1. **transcribe_node** - Extract audio + generate transcript (Whisper)
-2. **identify_clips_node** - AI finds best clips (GPT-4o-mini)
+2. **identify_clips_node** - AI finds best clips (Claude Haiku)
 3. **generate_captions_node** - Create subtitle files (ASS format)
 4. **render_node** - Render videos with burned-in subtitles (FFmpeg)
 
@@ -688,7 +688,7 @@ SUPABASE_URL=https://xxx.supabase.co
 SUPABASE_KEY=your-key
 
 # AI Model
-GITHUB_TOKEN=your-github-token
+ANTHROPIC_API_KEY=your-anthropic-api-key
 ```
 
 ### 3. Run Server
