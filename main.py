@@ -10,8 +10,9 @@ import asyncio
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from contextlib import asynccontextmanager
@@ -35,7 +36,13 @@ from utils.caption_generator import create_ass_file_for_clip
 from utils.file_utils import get_youtube_info, is_youtube_url, MAX_VIDEO_DURATION_SECONDS
 from workflow.graph import get_workflow, cleanup_connections
 from utils.quota import verify_session_owner
-from utils.queue_manager import enqueue_job, get_queue_status, start_worker, stop_worker
+from utils.queue_manager import enqueue_job, get_queue_status, start_worker, stop_worker, worker_health
+from utils.validation import validate_session_id, validate_video_url
+from utils.supabase_client import supabase
+
+# Bounds concurrent Whisper/FFmpeg work triggered by the standalone endpoints
+# (/transcribe, /render), which sit outside the job queue's MAX_CONCURRENT_JOBS cap.
+_STANDALONE_SEMAPHORE = asyncio.Semaphore(int(os.getenv("MAX_CONCURRENT_STANDALONE_JOBS", "2")))
 
 
 @asynccontextmanager
@@ -48,9 +55,9 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up Video Generator Worker API...")
     start_worker()
     yield
-    # Shutdown: stop queue worker then cleanup DB connections
+    # Shutdown: stop queue worker (draining in-flight jobs briefly) then cleanup DB connections
     logger.info("Shutting down application...")
-    stop_worker()
+    await stop_worker()
     await cleanup_connections()
     logger.info("Cleanup complete")
 
@@ -69,10 +76,44 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# This service is a backend-for-backend: only the Next.js server (never a browser)
+# should ever call it directly. Every route except the platform health check requires
+# a shared secret so the API can't be driven directly by anyone who can reach the host.
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY")
+if not INTERNAL_API_KEY:
+    raise RuntimeError(
+        "INTERNAL_API_KEY environment variable is required — set it to a long random "
+        "secret shared with the Next.js frontend (sent as the X-Internal-Api-Key header)."
+    )
+
+_PUBLIC_PATHS = {"/health", "/"}
+
+
+@app.middleware("http")
+async def require_internal_api_key(request: Request, call_next):
+    if request.method == "OPTIONS" or request.url.path in _PUBLIC_PATHS:
+        return await call_next(request)
+    if request.headers.get("x-internal-api-key") != INTERNAL_API_KEY:
+        return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    checks: dict = {"worker": worker_health()}
+    try:
+        await asyncio.to_thread(
+            lambda: supabase.table("sessions").select("id").limit(1).execute()
+        )
+        checks["supabase"] = {"ok": True}
+    except Exception as e:
+        checks["supabase"] = {"ok": False, "error": str(e)}
+
+    healthy = checks["worker"]["alive"] and checks["supabase"]["ok"]
+    return JSONResponse(
+        status_code=200 if healthy else 503,
+        content={"status": "ok" if healthy else "degraded", "checks": checks},
+    )
 
 
 class ValidateYoutubeRequest(BaseModel):
@@ -175,11 +216,14 @@ async def transcribe_endpoint(request: TranscribeRequest):
                 status_code=400,
                 detail="video_url or video_path is required"
             )
+        if request.video_url:
+            validate_video_url(request.video_url)
 
-        result = await transcribe_video(
-            video_url=request.video_url,
-            video_path=request.video_path
-        )
+        async with _STANDALONE_SEMAPHORE:
+            result = await transcribe_video(
+                video_url=request.video_url,
+                video_path=request.video_path
+            )
         return result
 
     except HTTPException:
@@ -206,6 +250,8 @@ async def generate_captions_endpoint(request: GenerateCaptionsRequest):
     ass_file_path = None
 
     try:
+        validate_session_id(request.session_id)
+
         # Convert Pydantic models to dicts for caption generator
         words_dict = [word.model_dump() for word in request.words]
 
@@ -275,6 +321,10 @@ async def render_endpoint(request: RenderRequest):
                 status_code=400,
                 detail="video_url or video_path is required"
             )
+        if request.video_url:
+            validate_video_url(request.video_url)
+        if request.session_id:
+            validate_session_id(request.session_id)
 
         # If video_url is provided and looks like a Supabase URL, download it first
         if request.video_url and "supabase" in request.video_url:
@@ -316,14 +366,15 @@ async def render_endpoint(request: RenderRequest):
                 logger.info(f"✅ Downloaded caption file to: {local_caption_path}")
 
         # Render the video (with optional captions)
-        result = await render_video(
-            video_url=request.video_url if not local_video_path else None,
-            video_path=local_video_path,
-            center_x=request.center_x,
-            start=request.start,
-            end=request.end,
-            subtitle_path=local_caption_path
-        )
+        async with _STANDALONE_SEMAPHORE:
+            result = await render_video(
+                video_url=request.video_url if not local_video_path else None,
+                video_path=local_video_path,
+                center_x=request.center_x,
+                start=request.start,
+                end=request.end,
+                subtitle_path=local_caption_path
+            )
 
         rendered_video_path = result["output_path"]
         duration = result["duration"]
@@ -415,15 +466,25 @@ async def process_video_workflow(request: ProcessVideoRequest):
     Poll the session status via Supabase or GET /process-video/queue-position/{session_id}
     to track progress.
     """
-    session_id = request.session_id or str(uuid.uuid4())
-    user_id = request.user_id or "anonymous"
+    if not request.session_id:
+        raise HTTPException(status_code=400, detail="session_id is required")
+    if not request.user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    try:
+        uuid.UUID(request.user_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="user_id must be a valid UUID")
+    validate_session_id(request.session_id)
+    validate_video_url(request.video_url)
+
+    session_id = request.session_id
+    user_id = request.user_id
     set_request_context(user_id, session_id)
     logger.info(f"🚀 POST /process-video  session={session_id}  url={request.video_url}")
 
     try:
-        # Verify session ownership when user_id is provided
-        if request.user_id and request.session_id:
-            verify_session_owner(request.session_id, request.user_id)
+        # Always verify the session belongs to this user before enqueueing work for it.
+        verify_session_owner(session_id, user_id)
 
         existing_clips = [c.model_dump() for c in request.existing_clips] if request.existing_clips else []
 
@@ -460,13 +521,39 @@ async def process_video_workflow(request: ProcessVideoRequest):
 
 @app.get("/process-video/status/{session_id}")
 async def get_processing_status(session_id: str):
-    """Poll current workflow state from the checkpointer."""
+    """
+    Poll current workflow state from the in-memory checkpointer. That checkpointer
+    is lost on every process restart/redeploy, so if it has nothing for this session
+    (current_stage is None) fall back to the durable `sessions` table instead of
+    reporting an empty/misleading state.
+    """
     workflow = await get_workflow()
     config = {"configurable": {"thread_id": session_id}}
     try:
         snapshot = await workflow.aget_state(config)
         values = snapshot.values if snapshot else {}
         current_stage = values.get("currentStage")
+
+        if current_stage is None:
+            session_result = await asyncio.to_thread(
+                lambda: supabase.table("sessions")
+                .select("status, current_stage, error_message, clips_metadata")
+                .eq("id", session_id)
+                .maybe_single()
+                .execute()
+            )
+            session = session_result.data if session_result else None
+            if session:
+                return {
+                    "session_id": session_id,
+                    "current_stage": session.get("current_stage") or session.get("status"),
+                    "is_complete": session.get("status") == "completed",
+                    "clips": session.get("clips_metadata"),
+                    "captions": None,
+                    "rendered_videos": None,
+                    "errors": [session["error_message"]] if session.get("error_message") else None,
+                }
+
         all_errors = values.get("errors") or []
         errors = [e for e in all_errors if e and str(e).strip()]
         return {

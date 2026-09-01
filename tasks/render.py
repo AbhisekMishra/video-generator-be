@@ -155,7 +155,11 @@ def _logo_as_png() -> Optional[str]:
         logger.warning(f"⚠️  No logo found in {_ASSETS_DIR} — skipping logo overlay")
         return None
 
-    png_path = tempfile.mktemp(suffix='.png')
+    # Allocate a collision-free unique name, then release it immediately — several
+    # branches below check os.path.exists(png_path) to detect whether their backend
+    # actually wrote the file, so it must not exist until one of them does.
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=True) as _tmp:
+        png_path = _tmp.name
 
     # 1. cairosvg
     try:
@@ -225,10 +229,13 @@ async def get_video_dimensions(video_path: str) -> tuple[int, int]:
     ]
 
     def run_ffprobe():
-        return subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        return subprocess.run(probe_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=20)
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, run_ffprobe)
+    try:
+        result = await loop.run_in_executor(None, run_ffprobe)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("FFprobe timed out")
 
     if result.returncode != 0:
         raise RuntimeError(f"FFprobe failed: {result.stderr.decode()}")
@@ -299,7 +306,10 @@ async def render_video(
             raise ValueError("Either video_url or video_path must be provided")
 
         duration = end - start
-        output_path = tempfile.mktemp(suffix=".mp4")
+        # Allocate a collision-free unique name, then release it immediately — the
+        # code below checks os.path.exists(output_path) to confirm FFmpeg wrote it.
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as _tmp:
+            output_path = _tmp.name
 
         # ── 2. Detect source dimensions ───────────────────────────────────
         orig_w, orig_h = await get_video_dimensions(input_path)
@@ -379,10 +389,13 @@ async def render_video(
 
         # ── 6. Run FFmpeg ─────────────────────────────────────────────────
         def run_ffmpeg():
-            return subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            return subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=300)
 
         loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(None, run_ffmpeg)
+        try:
+            result = await loop.run_in_executor(None, run_ffmpeg)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("FFmpeg render timed out")
 
         stderr_output = result.stderr.decode()
         if subtitle_path and stderr_output:

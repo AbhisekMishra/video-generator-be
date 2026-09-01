@@ -23,6 +23,9 @@ WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "3"))
 JOB_STALE_TIMEOUT_MINUTES = int(os.getenv("JOB_STALE_TIMEOUT_MINUTES", "15"))
 
 _worker_task: Optional[asyncio.Task] = None
+_active_job_tasks: set = set()
+_last_poll_at: Optional[datetime] = None
+SHUTDOWN_GRACE_SECONDS = int(os.getenv("SHUTDOWN_GRACE_SECONDS", "25"))
 
 
 # ---------------------------------------------------------------------------
@@ -133,12 +136,35 @@ def start_worker() -> asyncio.Task:
     return _worker_task
 
 
-def stop_worker() -> None:
-    """Cancel the queue worker. Call from FastAPI lifespan shutdown."""
+async def stop_worker() -> None:
+    """
+    Cancel the queue worker's poll loop, then wait briefly for any already-dispatched
+    jobs to finish so a deploy/restart doesn't abandon in-flight work mid-render.
+    Jobs still running after the grace period are left to the stale-job recovery
+    mechanism (JOB_STALE_TIMEOUT_MINUTES) to recycle on the next worker startup.
+    """
     global _worker_task
     if _worker_task and not _worker_task.done():
         _worker_task.cancel()
     _worker_task = None
+
+    if _active_job_tasks:
+        logger.info(
+            f"⏳ Waiting up to {SHUTDOWN_GRACE_SECONDS}s for "
+            f"{len(_active_job_tasks)} in-flight job(s) to finish..."
+        )
+        _, pending = await asyncio.wait(_active_job_tasks, timeout=SHUTDOWN_GRACE_SECONDS)
+        if pending:
+            logger.warning(f"⚠️  {len(pending)} job(s) still running at shutdown — will self-heal via stale-job recovery")
+
+
+def worker_health() -> Dict[str, Any]:
+    """Liveness signal for GET /health — is the poll loop still ticking?"""
+    if _last_poll_at is None:
+        return {"alive": False, "reason": "not_started"}
+    staleness = (datetime.now(timezone.utc) - _last_poll_at).total_seconds()
+    alive = staleness < WORKER_POLL_INTERVAL * 5
+    return {"alive": alive, "seconds_since_last_poll": round(staleness, 1)}
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +353,10 @@ async def _worker_loop() -> None:
         f"poll={WORKER_POLL_INTERVAL}s  stale_timeout={JOB_STALE_TIMEOUT_MINUTES}min"
     )
 
+    global _last_poll_at
+
     while True:
+        _last_poll_at = datetime.now(timezone.utc)
         try:
             await _recover_stale_jobs()
 
@@ -337,8 +366,10 @@ async def _worker_loop() -> None:
                 if job:
                     logger.info(f"📥 Claimed job {job['id']}  session={job['session_id']}  user={job.get('user_id', 'unknown')}")
                     task = asyncio.create_task(_process_job(job))
+                    _active_job_tasks.add(task)
 
                     def _on_done(t: asyncio.Task, _sid: str = job["session_id"]) -> None:
+                        _active_job_tasks.discard(t)
                         if not t.cancelled() and t.exception():
                             logger.error(f"❌ Unhandled exception in job task  session={_sid}: {t.exception()}")
 

@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import tempfile
 import asyncio
 import aiohttp
@@ -87,9 +88,21 @@ async def download_youtube_video(url: str) -> str:
 
     files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
     if not files:
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(f"yt-dlp produced no output for: {url}")
 
-    return files[0]
+    # Move the result out to a flat temp file so a plain cleanup_file(path) call
+    # (used by every existing caller) removes everything — otherwise the per-download
+    # directory created above (and any extra files yt-dlp leaves alongside it) would
+    # leak on disk forever, since nothing else ever rmtree's it.
+    src = files[0]
+    ext = os.path.splitext(src)[1] or ".mp4"
+    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as _tmp:
+        dest = _tmp.name
+    shutil.move(src, dest)
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return dest
 
 
 async def download_video(url: str) -> str:
@@ -102,7 +115,8 @@ async def download_video(url: str) -> str:
     Returns:
         Path to temporary file
     """
-    temp_file = tempfile.mktemp(suffix=".mp4")
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=True) as _tmp:
+        temp_file = _tmp.name
 
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as response:

@@ -29,10 +29,14 @@ async def _validate_video(video_path: str) -> None:
     ]
 
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False),
-    )
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, timeout=20),
+        )
+    except subprocess.TimeoutExpired:
+        # ffprobe hung — let FFmpeg surface a proper error downstream
+        return
 
     if result.returncode != 0:
         # ffprobe couldn't read the file — let FFmpeg surface a proper error downstream
@@ -102,8 +106,10 @@ async def transcribe_video(
         if os.path.exists(input_path):
             await _validate_video(input_path)
 
-        # Extract audio from video using FFmpeg
-        temp_audio_path = tempfile.mktemp(suffix=".wav")
+        # Extract audio from video using FFmpeg. Allocate a collision-free unique
+        # name, then release it immediately — FFmpeg (-y) creates the real file.
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as _tmp:
+            temp_audio_path = _tmp.name
         extract_audio_cmd = [
             "ffmpeg",
             "-i", input_path,
@@ -120,11 +126,15 @@ async def transcribe_video(
                 extract_audio_cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                check=False
+                check=False,
+                timeout=300,
             )
 
         loop = asyncio.get_event_loop()
-        ffmpeg_result = await loop.run_in_executor(None, run_ffmpeg)
+        try:
+            ffmpeg_result = await loop.run_in_executor(None, run_ffmpeg)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("FFmpeg audio extraction timed out")
 
         if ffmpeg_result.returncode != 0:
             raise RuntimeError(f"FFmpeg audio extraction failed: {ffmpeg_result.stderr.decode()}")

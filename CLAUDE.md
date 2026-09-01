@@ -18,6 +18,13 @@ python main.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+### Run tests
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+CI (`.github/workflows/ci.yml`) runs this plus a full `py_compile` syntax check on every push/PR. Tests only cover pure validation/parsing logic (`utils/validation.py`, `utils/file_utils.py`) — nothing exercises the queue worker, LangGraph nodes, or FFmpeg/Whisper pipeline end-to-end yet.
+
 ### Prerequisites
 - Python 3.9+
 - FFmpeg installed and available in PATH (`ffmpeg -version` to verify)
@@ -30,6 +37,7 @@ SUPABASE_URL=
 SUPABASE_SERVICE_ROLE_KEY=
 SUPABASE_STORAGE_BUCKET=video-storage
 ANTHROPIC_API_KEY=               # API key for Claude (used by identify_clips_node)
+INTERNAL_API_KEY=                # Shared secret required on every request (X-Internal-Api-Key header). Must match FASTAPI_INTERNAL_API_KEY on the frontend. Required — the app fails to start without it.
 MAX_VIDEO_DURATION_SECONDS=1800  # Default: 30 minutes
 MAX_CONCURRENT_JOBS=2
 WORKER_POLL_INTERVAL=3
