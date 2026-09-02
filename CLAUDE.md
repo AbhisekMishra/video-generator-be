@@ -72,6 +72,16 @@ _transcribe_stage -> _identify_clips_stage -> _generate_captions_stage -> _rende
 
 **Resumability**: each stage's output is cached in the session's `pipeline_state` (JSONB column) as it completes — `get_pipeline_state()`/`save_pipeline_state()` in `utils/supabase_client.py`. A retried job checks this cache before redoing a stage, so a crash after transcription (the expensive Whisper step) doesn't force a full redo. The render stage goes further: it caches each *individual* rendered clip's URL, so a crash partway through rendering only re-renders the clips that didn't finish. This is real, durable resumability — unlike the LangGraph version it replaced, whose in-memory `MemorySaver` checkpoint was explicitly wiped before every run anyway and never actually enabled resuming.
 
+### YouTube bot-detection mitigations (`utils/file_utils.py`)
+
+Cloud host IPs (Railway, Render, AWS, etc.) intermittently get blocked by YouTube with `"Sign in to confirm you're not a bot"` — this is IP-reputation-based, not tied to a specific video (verified: an affected download succeeds immediately from a residential IP with identical yt-dlp options). Three layered mitigations, roughly in order of how much they help:
+
+1. **`extractor_args: {player_client: [android, ios, web]}`** on every yt-dlp call — the android/ios clients skip the web client's JS-signature/bot-check gate entirely.
+2. **`_retry_yt_dlp()`** wraps both `get_youtube_info()` and `download_youtube_video()`: 3 attempts, linear backoff (5s, 10s). Helps with brief blips; does not reliably beat a sustained block.
+3. **Dockerfile pins yt-dlp to the nightly channel** (`pip install --pre --upgrade yt-dlp`, separate from the main `requirements.txt` install so `--pre` doesn't leak into other dependencies) — YouTube-facing extractor fixes land in nightly first, often days before a stable release.
+
+None of this is a guaranteed fix — that would require either a residential/rotating proxy (cost + infra, no account risk) or cookies from a dedicated YouTube account (free, but account-ban risk and needs periodic manual refresh as cookies expire). Both were discussed with the user (2026-09-02) and deliberately not implemented yet — revisit if failures are still frequent after the mitigations above.
+
 ### Queue Manager (`utils/queue_manager.py`)
 
 Uses Supabase `job_queue` table as persistent queue backend. A single asyncio background task (`_worker_loop`) polls every `WORKER_POLL_INTERVAL` seconds, claims jobs with optimistic locking, and dispatches up to `MAX_CONCURRENT_JOBS` concurrent pipeline runs. Stale `processing` jobs are automatically recycled after `JOB_STALE_TIMEOUT_MINUTES`. `_process_job()` catches `_StageFailed` (a stage already recorded the real error) separately from any other exception (a true crash, for which it writes a generic fallback error to the session as a safety net).

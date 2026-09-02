@@ -17,7 +17,9 @@ faster-whisper>=1.0.0,<2.0.0
 
 # YouTube video downloading. Deliberately NOT upper-bounded — yt-dlp ships frequent
 # releases to keep up with YouTube extractor changes; pinning a ceiling here would
-# block those fixes from being picked up.
+# block those fixes from being picked up. This is the floor version only — the
+# Dockerfile upgrades yt-dlp again afterward to the latest *nightly* build specifically,
+# since YouTube-facing fixes land there before a stable release.
 yt-dlp>=2024.1.0
 
 # Note: FFmpeg must be installed separately on the system
