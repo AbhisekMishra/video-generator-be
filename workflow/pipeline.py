@@ -435,9 +435,19 @@ async def _render_stage(
     """
     logger.info("🎬 Rendering videos...")
     rendered: Dict[str, Dict] = pipeline_state.setdefault("rendered", {})
-    render_video_url = None if local_video_path else video_url
 
     try:
+        # Download once up front rather than letting each clip's render_video() call
+        # fall back to downloading independently — without this, a cache miss here
+        # meant 3 separate downloads (one per clip) instead of 1, tripling exposure to
+        # YouTube's bot-check for a single render attempt.
+        if not local_video_path and is_youtube_url(video_url) and any(str(i) not in rendered for i in range(len(clips))):
+            logger.info(f"📥 Downloading YouTube video for rendering: {video_url}")
+            local_video_path = await download_youtube_video(video_url, session_id=session_id)
+            logger.info(f"✅ YouTube video downloaded to: {local_video_path}")
+
+        render_video_url = None if local_video_path else video_url
+
         for i, clip in enumerate(clips):
             if str(i) in rendered:
                 logger.info(f"⏭️  Clip {i + 1}/{len(clips)} already rendered — skipping")
