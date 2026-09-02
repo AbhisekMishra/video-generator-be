@@ -15,9 +15,32 @@ _YOUTUBE_PATTERN = re.compile(
 
 MAX_VIDEO_DURATION_SECONDS = int(os.getenv("MAX_VIDEO_DURATION_SECONDS", str(30 * 60)))
 
+# YouTube's bot-detection block ("Sign in to confirm you're not a bot") is largely
+# IP-reputation-based on cloud hosts (Railway/Render/AWS/etc.) rather than tied to a
+# specific video — it can clear up within seconds, so a few retries with backoff
+# meaningfully improve success without needing cookies or a proxy.
+YT_DLP_MAX_ATTEMPTS = 3
+YT_DLP_RETRY_DELAY_SECONDS = 5
+
 
 def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_PATTERN.search(url))
+
+
+async def _retry_yt_dlp(attempt_fn, description: str):
+    """Run attempt_fn() (async, does its own setup/cleanup) up to YT_DLP_MAX_ATTEMPTS
+    times with linear backoff, for the transient-bot-check case described above."""
+    last_error = None
+    for attempt in range(1, YT_DLP_MAX_ATTEMPTS + 1):
+        try:
+            return await attempt_fn()
+        except Exception as e:
+            last_error = e
+            if attempt < YT_DLP_MAX_ATTEMPTS:
+                delay = YT_DLP_RETRY_DELAY_SECONDS * attempt
+                logger.warning(f"⚠️  {description} failed (attempt {attempt}/{YT_DLP_MAX_ATTEMPTS}): {e} — retrying in {delay}s")
+                await asyncio.sleep(delay)
+    raise last_error
 
 
 async def get_youtube_info(url: str) -> dict:
@@ -41,7 +64,7 @@ async def get_youtube_info(url: str) -> dict:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             return ydl.extract_info(url, download=False)
 
-    info = await asyncio.to_thread(_extract)
+    info = await _retry_yt_dlp(lambda: asyncio.to_thread(_extract), "YouTube metadata fetch")
     return {
         'duration': info.get('duration') or 0,
         'title': info.get('title') or 'Unknown',
@@ -70,49 +93,58 @@ async def download_youtube_video(url: str) -> str:
     except Exception as e:
         logger.warning(f"⚠️  Could not fetch YouTube metadata before download (skipping duration check): {e}")
 
-    temp_dir = tempfile.mkdtemp()
-    output_template = os.path.join(temp_dir, 'video.%(ext)s')
+    async def _attempt() -> str:
+        # A fresh temp_dir per attempt — reusing one across retries risks yt-dlp
+        # tripping over a partial file left by the previous failed attempt.
+        temp_dir = tempfile.mkdtemp()
+        output_template = os.path.join(temp_dir, 'video.%(ext)s')
 
-    ydl_opts = {
-        # Cap at 480p to keep rendered clips well under Supabase's 50 MB upload limit.
-        # 480p is sufficient for 9:16 short-form clips and dramatically reduces file size vs 1080p.
-        'format': (
-            'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]'
-            '/best[height<=480][ext=mp4]'
-            '/best[height<=480]'
-            '/worst'
-        ),
-        'outtmpl': output_template,
-        'merge_output_format': 'mp4',
-        'quiet': False,
-        'no_warnings': False,
-        # See get_youtube_info's comment — same bot-check bypass for the actual download.
-        'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
-    }
+        ydl_opts = {
+            # Cap at 480p to keep rendered clips well under Supabase's 50 MB upload limit.
+            # 480p is sufficient for 9:16 short-form clips and dramatically reduces file size vs 1080p.
+            'format': (
+                'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]'
+                '/best[height<=480][ext=mp4]'
+                '/best[height<=480]'
+                '/worst'
+            ),
+            'outtmpl': output_template,
+            'merge_output_format': 'mp4',
+            'quiet': False,
+            'no_warnings': False,
+            # See get_youtube_info's comment — same bot-check bypass for the actual download.
+            'extractor_args': {'youtube': {'player_client': ['android', 'ios', 'web']}},
+        }
 
-    def _download():
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
+        def _download():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
 
-    await asyncio.to_thread(_download)
+        try:
+            await asyncio.to_thread(_download)
+        except Exception:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise
 
-    files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
-    if not files:
+        files = [os.path.join(temp_dir, f) for f in os.listdir(temp_dir)]
+        if not files:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(f"yt-dlp produced no output for: {url}")
+
+        # Move the result out to a flat temp file so a plain cleanup_file(path) call
+        # (used by every existing caller) removes everything — otherwise the per-download
+        # directory created above (and any extra files yt-dlp leaves alongside it) would
+        # leak on disk forever, since nothing else ever rmtree's it.
+        src = files[0]
+        ext = os.path.splitext(src)[1] or ".mp4"
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as _tmp:
+            dest = _tmp.name
+        shutil.move(src, dest)
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise RuntimeError(f"yt-dlp produced no output for: {url}")
 
-    # Move the result out to a flat temp file so a plain cleanup_file(path) call
-    # (used by every existing caller) removes everything — otherwise the per-download
-    # directory created above (and any extra files yt-dlp leaves alongside it) would
-    # leak on disk forever, since nothing else ever rmtree's it.
-    src = files[0]
-    ext = os.path.splitext(src)[1] or ".mp4"
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as _tmp:
-        dest = _tmp.name
-    shutil.move(src, dest)
-    shutil.rmtree(temp_dir, ignore_errors=True)
+        return dest
 
-    return dest
+    return await _retry_yt_dlp(_attempt, "YouTube video download")
 
 
 async def download_video(url: str) -> str:
