@@ -2,6 +2,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 import asyncio
 import aiohttp
 from typing import Optional
@@ -19,12 +20,79 @@ MAX_VIDEO_DURATION_SECONDS = int(os.getenv("MAX_VIDEO_DURATION_SECONDS", str(30 
 # IP-reputation-based on cloud hosts (Railway/Render/AWS/etc.) rather than tied to a
 # specific video — it can clear up within seconds, so a few retries with backoff
 # meaningfully improve success without needing cookies or a proxy.
-YT_DLP_MAX_ATTEMPTS = 3
+YT_DLP_MAX_ATTEMPTS = 5
 YT_DLP_RETRY_DELAY_SECONDS = 5
+
+# A resumed job (retry, or the queue's stale-job recovery) skips straight to whatever
+# stage isn't cached yet — if that's render, it needs the source video again. Keying
+# downloads by session_id here lets it reuse the file already downloaded during
+# transcribe instead of hitting YouTube's bot-check a second time. Bounded by both a
+# TTL and a hard size cap (checked on every write) so many concurrent/failed sessions
+# can't fill the disk and crash the pod — see _enforce_video_cache_limits().
+VIDEO_CACHE_DIR = os.path.join(tempfile.gettempdir(), "clipai_video_cache")
+VIDEO_CACHE_MAX_AGE_MINUTES = int(os.getenv("VIDEO_CACHE_MAX_AGE_MINUTES", "60"))
+VIDEO_CACHE_MAX_TOTAL_MB = int(os.getenv("VIDEO_CACHE_MAX_TOTAL_MB", "3000"))
 
 
 def is_youtube_url(url: str) -> bool:
     return bool(_YOUTUBE_PATTERN.search(url))
+
+
+def get_cached_video_path(session_id: str) -> Optional[str]:
+    """Return a previously-downloaded video for this session, if still cached."""
+    if not session_id or not os.path.isdir(VIDEO_CACHE_DIR):
+        return None
+    for name in os.listdir(VIDEO_CACHE_DIR):
+        if os.path.splitext(name)[0] == session_id:
+            path = os.path.join(VIDEO_CACHE_DIR, name)
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _enforce_video_cache_limits() -> None:
+    """
+    Bound the video cache's disk footprint: drop entries older than
+    VIDEO_CACHE_MAX_AGE_MINUTES, then evict oldest-first if the total size is still
+    over VIDEO_CACHE_MAX_TOTAL_MB. Called after every write so the cache self-cleans
+    without needing a separate background sweep.
+    """
+    if not os.path.isdir(VIDEO_CACHE_DIR):
+        return
+
+    now = time.time()
+    max_age_seconds = VIDEO_CACHE_MAX_AGE_MINUTES * 60
+    entries = []
+    for name in os.listdir(VIDEO_CACHE_DIR):
+        path = os.path.join(VIDEO_CACHE_DIR, name)
+        try:
+            stat = os.stat(path)
+        except OSError:
+            continue
+        if now - stat.st_mtime > max_age_seconds:
+            try:
+                os.remove(path)
+                logger.info(f"🗑️  Video cache: evicted expired entry {name}")
+            except OSError:
+                pass
+            continue
+        entries.append((path, stat.st_mtime, stat.st_size))
+
+    total_bytes = sum(e[2] for e in entries)
+    max_bytes = VIDEO_CACHE_MAX_TOTAL_MB * 1024 * 1024
+    if total_bytes <= max_bytes:
+        return
+
+    entries.sort(key=lambda e: e[1])  # oldest first
+    for path, _mtime, size in entries:
+        if total_bytes <= max_bytes:
+            break
+        try:
+            os.remove(path)
+            total_bytes -= size
+            logger.info(f"🗑️  Video cache: evicted {os.path.basename(path)} to stay under {VIDEO_CACHE_MAX_TOTAL_MB}MB cap")
+        except OSError:
+            pass
 
 
 async def _retry_yt_dlp(attempt_fn, description: str):
@@ -71,10 +139,16 @@ async def get_youtube_info(url: str) -> dict:
     }
 
 
-async def download_youtube_video(url: str) -> str:
+async def download_youtube_video(url: str, session_id: Optional[str] = None) -> str:
     """
     Download a YouTube video using yt-dlp. Returns path to the downloaded file.
-    Caller is responsible for cleanup.
+
+    If session_id is given, the file is saved under VIDEO_CACHE_DIR keyed by that id
+    (bounded by a TTL + size cap, not caller-cleaned) so a later stage or a retry can
+    reuse it via get_cached_video_path() instead of downloading again. Without a
+    session_id, behaves as before: a plain temp file the caller is responsible for
+    cleaning up.
+
     Raises ValueError if the video exceeds MAX_VIDEO_DURATION_SECONDS.
     """
     import yt_dlp
@@ -131,16 +205,23 @@ async def download_youtube_video(url: str) -> str:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise RuntimeError(f"yt-dlp produced no output for: {url}")
 
-        # Move the result out to a flat temp file so a plain cleanup_file(path) call
-        # (used by every existing caller) removes everything — otherwise the per-download
-        # directory created above (and any extra files yt-dlp leaves alongside it) would
-        # leak on disk forever, since nothing else ever rmtree's it.
+        # Move the result out of the per-download directory (and any extra files
+        # yt-dlp leaves alongside it) so nothing here leaks on disk forever.
         src = files[0]
         ext = os.path.splitext(src)[1] or ".mp4"
-        with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as _tmp:
-            dest = _tmp.name
+
+        if session_id:
+            os.makedirs(VIDEO_CACHE_DIR, exist_ok=True)
+            dest = os.path.join(VIDEO_CACHE_DIR, f"{session_id}{ext}")
+        else:
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=True) as _tmp:
+                dest = _tmp.name
+
         shutil.move(src, dest)
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if session_id:
+            _enforce_video_cache_limits()
 
         return dest
 

@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 
 from tasks.transcribe import transcribe_video
 from tasks.render import render_video
-from utils.file_utils import is_youtube_url, download_youtube_video
+from utils.file_utils import is_youtube_url, download_youtube_video, get_cached_video_path
 from utils.caption_generator import create_ass_file_for_clip
 from workflow.state import Transcript, TranscriptWord, Clip, CaptionData, ExistingClip
 from utils.supabase_client import (
@@ -83,8 +83,13 @@ async def _transcribe_stage(video_url: str, session_id: str) -> Tuple[Transcript
     Download (if YouTube) and transcribe the video with Whisper.
 
     Returns (transcript, local_video_path). local_video_path is the downloaded YouTube
-    file, reused by the render stage to avoid re-downloading per clip; it's None for
-    non-YouTube URLs (FFmpeg streams directly from video_url instead).
+    file (cached under session_id — see utils/file_utils.py's video cache — so a later
+    stage or a retry can reuse it via get_cached_video_path() instead of re-downloading);
+    it's None for non-YouTube URLs (FFmpeg streams directly from video_url instead).
+
+    A failure here deliberately does NOT delete an already-downloaded video — it's left
+    cached (bounded by a TTL/size cap, not this function) so a retry doesn't need to
+    hit YouTube's bot-check a second time for the same session.
     """
     logger.info(f"🎤 Transcribing video...  url={video_url}  session={session_id}")
     local_video_path = None
@@ -92,7 +97,7 @@ async def _transcribe_stage(video_url: str, session_id: str) -> Tuple[Transcript
     try:
         if is_youtube_url(video_url):
             logger.info(f"📥 Downloading YouTube video (once for full pipeline): {video_url}")
-            local_video_path = await download_youtube_video(video_url)
+            local_video_path = await download_youtube_video(video_url, session_id=session_id)
             logger.info(f"✅ YouTube video downloaded to: {local_video_path}")
 
         result = await transcribe_video(
@@ -104,8 +109,6 @@ async def _transcribe_stage(video_url: str, session_id: str) -> Tuple[Transcript
         logger.info(f"✅ Transcription successful! Got {len(words)} words  language={result.get('language')}")
 
         if not words:
-            if local_video_path and os.path.exists(local_video_path):
-                os.remove(local_video_path)
             fail_session(session_id, "no_speech_detected", "transcribe")
             raise _StageFailed("no_speech_detected")
 
@@ -135,15 +138,11 @@ async def _transcribe_stage(video_url: str, session_id: str) -> Tuple[Transcript
             limit = parts[2] if len(parts) > 2 else "30"
             error_code = f"Video is too long ({minutes} min). Maximum supported length is {limit} minutes. Please use a shorter clip."
         logger.error(f"❌ Video validation failed: {error_code}  video_url={video_url}")
-        if local_video_path and os.path.exists(local_video_path):
-            os.remove(local_video_path)
         fail_session(session_id, error_code, "transcribe")
         raise _StageFailed(error_code) from e
 
     except Exception as e:
         logger.exception(f"❌ Transcription failed  video_url={video_url}")
-        if local_video_path and os.path.exists(local_video_path):
-            os.remove(local_video_path)
         fail_session(session_id, str(e), "transcribe")
         raise _StageFailed(str(e)) from e
 
@@ -512,8 +511,8 @@ async def _render_stage(
 
     except Exception as e:
         logger.exception("❌ Rendering failed")
-        if local_video_path and os.path.exists(local_video_path):
-            os.remove(local_video_path)
+        # Deliberately not deleting local_video_path here — leave it cached (bounded
+        # by the video cache's TTL/size cap) so a retry doesn't need to re-download.
         fail_session(session_id, str(e), "render")
         raise _StageFailed(str(e)) from e
 
@@ -535,6 +534,9 @@ async def run_pipeline(session_id: str, video_url: str, existing_clips: List[Exi
     if "transcript" in pipeline_state:
         logger.info(f"⏭️  Session {session_id}: transcript already cached — skipping transcribe")
         transcript = pipeline_state["transcript"]
+        # transcribe_stage isn't re-run, but its downloaded video may still be
+        # cached (see utils/file_utils.py) — reuse it for render if so.
+        local_video_path = get_cached_video_path(session_id)
     else:
         transcript, local_video_path = await _transcribe_stage(video_url, session_id)
         pipeline_state["transcript"] = transcript
