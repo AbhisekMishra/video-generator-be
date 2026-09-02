@@ -258,11 +258,13 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
         for attempt in range(1, MAX_ATTEMPTS + 1):
             logger.info(f"📡 Calling LLM ({model_name}, attempt {attempt}/{MAX_ATTEMPTS})...")
             try:
+                # anthropic SDK v1.0+ removed temperature/top_p/top_k from Messages
+                # methods entirely (TypeError if passed) — current models don't use
+                # them anyway, so there's nothing to replace this with.
                 response = await asyncio.wait_for(
                     client.messages.create(
                         model=model_name,
                         max_tokens=4096,
-                        temperature=0.7,
                         messages=[{"role": "user", "content": prompt}],
                     ),
                     timeout=60,
