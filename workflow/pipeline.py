@@ -38,6 +38,9 @@ from utils.supabase_client import (
 )
 
 CLIPS_MODEL = "claude-haiku-4-5-20251001"
+CLIPS_RETRY_DELAY_SECONDS = 3  # linear backoff between LLM retries — a rate limit or
+                                # transient error retried with zero delay just hits the
+                                # same wall again immediately
 
 _SENTENCE_ENDERS = (".", "!", "?")
 
@@ -246,6 +249,12 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
         content = None
         clips = None
 
+        async def _wait_before_retry(attempt: int) -> None:
+            if attempt < MAX_ATTEMPTS:
+                delay = CLIPS_RETRY_DELAY_SECONDS * attempt
+                logger.info(f"⏳ Waiting {delay}s before retrying...")
+                await asyncio.sleep(delay)
+
         for attempt in range(1, MAX_ATTEMPTS + 1):
             logger.info(f"📡 Calling LLM ({model_name}, attempt {attempt}/{MAX_ATTEMPTS})...")
             try:
@@ -258,14 +267,31 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
                     ),
                     timeout=60,
                 )
-                content = response.content[0].text
+                # Take only text blocks — content can be empty (e.g. a refusal, or a
+                # stop_reason other than "end_turn") or contain non-text blocks, and
+                # response.content[0].text would raise IndexError/AttributeError on
+                # those instead of falling into the "unparseable, retry" path below.
+                content = "".join(
+                    block.text for block in response.content
+                    if getattr(block, "type", None) == "text"
+                )
+                if not content:
+                    logger.warning(
+                        f"⚠️ {model_name} returned no text content (attempt {attempt}/{MAX_ATTEMPTS}, "
+                        f"stop_reason={getattr(response, 'stop_reason', 'unknown')}) — retrying"
+                    )
+                    content = None
+                    await _wait_before_retry(attempt)
+                    continue
             except asyncio.TimeoutError:
                 logger.warning(f"⏱️ {model_name} timed out (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
                 content = None
+                await _wait_before_retry(attempt)
                 continue
             except Exception as e:
-                logger.warning(f"⚠️ {model_name} error (attempt {attempt}/{MAX_ATTEMPTS}): {e} — retrying")
+                logger.warning(f"⚠️ {model_name} error (attempt {attempt}/{MAX_ATTEMPTS}): {type(e).__name__}: {e} — retrying")
                 content = None
+                await _wait_before_retry(attempt)
                 continue
 
             logger.info(f"🤖 LLM raw response ({model_name}):\n{content}\n{'=' * 80}")
@@ -274,6 +300,7 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
             if not json_match:
                 logger.warning(f"⚠️ {model_name} returned unparseable response (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
                 content = None
+                await _wait_before_retry(attempt)
                 continue
 
             try:
@@ -282,6 +309,7 @@ IMPORTANT: Return ONLY the JSON array, no additional text."""
             except json.JSONDecodeError:
                 logger.warning(f"⚠️ {model_name} returned invalid JSON (attempt {attempt}/{MAX_ATTEMPTS}) — retrying")
                 content = None
+                await _wait_before_retry(attempt)
                 continue
 
         if content is None:
